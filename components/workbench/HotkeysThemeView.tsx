@@ -1,17 +1,13 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Palette, Keyboard, LayoutGrid, Check, RotateCcw } from 'lucide-react';
+import { Keyboard, LayoutGrid, RotateCcw } from 'lucide-react';
 import {
-  ANTIGRAVITY_THEMES,
-  AntigravityTheme,
   HotkeyBinding,
   WORKSPACE_PRESETS,
 } from '@/lib/preview-devices';
 
 interface HotkeysThemeViewProps {
-  activeThemeKey: AntigravityTheme['key'];
-  onSelectTheme: (key: AntigravityTheme['key']) => void;
   hotkeys: HotkeyBinding[];
   onUpdateHotkey: (id: string, newCombo: string) => void;
   onResetHotkeys: () => void;
@@ -20,8 +16,6 @@ interface HotkeysThemeViewProps {
 }
 
 export function HotkeysThemeView({
-  activeThemeKey,
-  onSelectTheme,
   hotkeys,
   onUpdateHotkey,
   onResetHotkeys,
@@ -47,70 +41,7 @@ export function HotkeysThemeView({
 
   return (
     <div className="space-y-6">
-      {/* SECTION 1: ANTIGRAVITY NATIVE THEMES */}
-      <div
-        className={`p-5 rounded-2xl border ${
-          isDark ? 'bg-[#11111C] border-white/10' : 'bg-white border-slate-200'
-        }`}
-      >
-        <div className="pb-4 border-b border-slate-200 dark:border-white/10">
-          <h2 className="text-base font-bold tracking-tight flex items-center gap-2">
-            <Palette className="w-4 h-4 text-[#B833FF]" />
-            <span>Темы рабочей станции Antigravity IDE</span>
-          </h2>
-          <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-            Выберите цветовую палитру окружения для комфортной инспекции светлых и тёмных интерфейсов
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
-          {Object.values(ANTIGRAVITY_THEMES).map((theme) => {
-            const isSelected = theme.key === activeThemeKey;
-            return (
-              <button
-                key={theme.key}
-                type="button"
-                onClick={() => onSelectTheme(theme.key)}
-                className={`p-4 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-3 ${
-                  isSelected
-                    ? 'border-[#B833FF] ring-2 ring-[#B833FF]/30'
-                    : isDark
-                    ? 'bg-[#161625] border-white/10 hover:border-white/25'
-                    : 'bg-slate-50 border-slate-200 hover:border-slate-300'
-                }`}
-              >
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold">{theme.name}</span>
-                    {isSelected && <Check className="w-4 h-4 text-[#B833FF]" />}
-                  </div>
-                  <p className={`text-[11px] leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                    {theme.subtitle}
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-2 pt-2">
-                  <span
-                    className={`w-6 h-6 rounded-lg border border-white/20 ${theme.canvasBg}`}
-                    title="Фон холста"
-                  />
-                  <span
-                    className={`w-6 h-6 rounded-lg border border-white/20 ${theme.surfaceBg}`}
-                    title="Поверхность панели"
-                  />
-                  <span
-                    style={{ backgroundColor: theme.accentHex }}
-                    className="w-6 h-6 rounded-lg border border-white/20"
-                    title="Акцентный импульс"
-                  />
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* SECTION 2: CUSTOM HOTKEYS MANAGER */}
+      {/* SECTION 1: CUSTOM HOTKEYS MANAGER */}
       <div
         className={`p-5 rounded-2xl border ${
           isDark ? 'bg-[#11111C] border-white/10' : 'bg-white border-slate-200'
@@ -178,7 +109,7 @@ export function HotkeysThemeView({
         </div>
       </div>
 
-      {/* SECTION 3: WORKSPACE MULTI-DEVICE PRESETS */}
+      {/* SECTION 2: WORKSPACE MULTI-DEVICE PRESETS */}
       <div
         className={`p-5 rounded-2xl border ${
           isDark ? 'bg-[#11111C] border-white/10' : 'bg-white border-slate-200'

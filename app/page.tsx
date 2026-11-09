@@ -2014,10 +2014,10 @@ export default function ViewerAntigravityWorkbench() {
                 dockPosition === 'left' ? 'border-r' : 'border-l'
               } ${currentTheme.surfaceBg} ${currentTheme.borderClass}`}
             >
-              {/* DOCK HEADER: SECTION TABS (Слои & Инспектор | Очередь | Аудит | Код | Темы) + SIDE TOGGLE */}
+              {/* DOCK HEADER: SECTION TABS (Слои | Очередь | Аудит | Код | Настройки) + SIDE TOGGLE */}
               <div className="flex items-center gap-1.5 shrink-0">
                 <div
-                  className={`flex-1 grid grid-cols-5 gap-0.5 p-0.5 rounded-lg border ${
+                  className={`flex-1 flex items-center gap-1 p-0.5 rounded-lg border overflow-hidden ${
                     isDark ? 'bg-[#0E0E11] border-[#27272A]' : 'bg-zinc-100 border-zinc-200'
                   }`}
                 >
@@ -2025,7 +2025,7 @@ export default function ViewerAntigravityWorkbench() {
                     {
                       id: 'layers' as const,
                       label: 'Слои',
-                      title: 'Единый конструктор слоёв и инспектор DOM (Alt+I)',
+                      title: 'Слои — Инспектор DOM и конструктор слоёв (Alt+I)',
                       icon: Layers,
                     },
                     {
@@ -2039,7 +2039,7 @@ export default function ViewerAntigravityWorkbench() {
                       id: 'audit' as const,
                       label: 'Аудит',
                       count: auditIssues.length,
-                      title: `Проверка вёрстки и Telegram (${auditIssues.length})`,
+                      title: `Аудит вёрстки и Telegram (${auditIssues.length})`,
                       icon: ShieldCheck,
                     },
                     {
@@ -2050,8 +2050,8 @@ export default function ViewerAntigravityWorkbench() {
                     },
                     {
                       id: 'settings' as const,
-                      label: 'Темы',
-                      title: 'Темы оформления и горячие клавиши',
+                      label: 'Настройки',
+                      title: 'Настройки — Горячие клавиши и сценарии экранов',
                       icon: Settings,
                     },
                   ].map((tab) => {
@@ -2066,20 +2066,28 @@ export default function ViewerAntigravityWorkbench() {
                           setDockTab(tab.id);
                           if (tab.id === 'audit') setTimeout(handleRunLayoutAudit, 80);
                         }}
-                        className={`h-7 px-1 rounded-md text-[11px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors whitespace-nowrap ${
+                        className={`h-7 rounded-md text-[11px] font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-all duration-200 whitespace-nowrap ${
                           isActive
                             ? isDark
-                              ? 'bg-zinc-200 text-zinc-950 font-semibold shadow-xs'
-                              : 'bg-white text-zinc-950 font-semibold shadow-xs'
+                              ? 'flex-1 bg-zinc-200 text-zinc-950 font-semibold px-2.5 shadow-xs'
+                              : 'flex-1 bg-white text-zinc-950 font-semibold px-2.5 shadow-xs'
                             : isDark
-                            ? 'text-zinc-400 hover:text-zinc-100'
-                            : 'text-zinc-600 hover:text-zinc-900'
+                            ? 'px-2 text-zinc-400 hover:text-zinc-100 hover:bg-[#18181C]'
+                            : 'px-2 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/60'
                         }`}
                       >
                         <tab.icon className="w-3.5 h-3.5 shrink-0" />
-                        <span className="hidden sm:inline">{tab.label}</span>
+                        {isActive && (
+                          <span className="truncate">{tab.label}</span>
+                        )}
                         {tab.count !== undefined && tab.count > 0 && (
-                          <span className="text-[9px] font-mono opacity-70 tabular-nums">
+                          <span
+                            className={`text-[9px] font-mono tabular-nums px-1 py-0.2 rounded-full ${
+                              isActive
+                                ? 'bg-zinc-950/15 text-zinc-950 font-bold'
+                                : 'bg-[#B833FF]/20 text-[#B833FF] font-bold'
+                            }`}
+                          >
                             {tab.count}
                           </span>
                         )}
@@ -2288,8 +2296,6 @@ export default function ViewerAntigravityWorkbench() {
               {dockTab === 'settings' && (
                 <div className="overflow-y-auto">
                   <HotkeysThemeView
-                    activeThemeKey={themeKey}
-                    onSelectTheme={setThemeKey}
                     hotkeys={hotkeys}
                     onUpdateHotkey={(id, newCombo) =>
                       setHotkeys((prev) =>
