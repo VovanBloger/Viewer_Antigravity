@@ -1,7 +1,15 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Copy, Check, FileCode, Cpu, Zap, Layers, Terminal, ArrowRight } from 'lucide-react';
+import {
+  Copy,
+  Check,
+  FileCode,
+  Terminal,
+  ChevronDown,
+  ChevronRight,
+  Code2,
+} from 'lucide-react';
 
 interface ModuleFileEntry {
   id: string;
@@ -17,7 +25,7 @@ const MODULES_CATALOG: ModuleFileEntry[] = [
     id: 'haptics-singleton',
     filename: 'lib/haptics.ts',
     title: 'Синглтон Web Audio Haptics & Телеметрия',
-    role: 'Устраняет утечку памяти AudioContext (лимит 6–32 контекстов в браузере) из исходного репозитория и добавляет профили огибающих частот.',
+    role: 'Устраняет утечку памяти AudioContext (лимит 6–32 контекстов в браузере) и добавляет профили огибающих частот.',
     linesSavedOrImpact: '0 утечек AudioContext · < 0.2ms задержка импульса',
     code: `// lib/haptics.ts — Готовый модуль для переноса в VovanBloger/Viewer_Antigravity
 export type ImpactStyle = 'light' | 'medium' | 'heavy' | 'rigid' | 'soft' | 'selection' | 'success' | 'warning' | 'error';
@@ -59,7 +67,7 @@ export const hapticAudioEngine = new HapticAudioEngine();`,
     id: 'raf-inspector',
     filename: 'lib/dom-inspector.ts',
     title: 'rAF-Инспектор Z-Index слоёв и Box Model HUD',
-    role: 'Оборачивает вызовы elementsFromPoint и getBoundingClientRect в requestAnimationFrame, предотвращая Layout Thrashing при движении мыши по iframe.',
+    role: 'Оборачивает вызовы elementsFromPoint и getBoundingClientRect в requestAnimationFrame, предотвращая Layout Thrashing.',
     linesSavedOrImpact: 'Стабильные 60 FPS при 3 открытых экранах',
     code: `// Фрагмент rAF-троттлинга инспектора для внедрения в useEffect(isInspectMode)
 let rafId: number | null = null;
@@ -88,9 +96,9 @@ const handleMouseMove = (e: MouseEvent) => {
   {
     id: 'prompt-queue-diff',
     filename: 'lib/antigravity-core.ts',
-    title: 'Генератор диффов (Было → Стало) и Пакетная очередь агента',
-    role: 'Вычисляет дельту изменений между исходным состоянием DOM-узла и настройками StyleTuner, формируя готовые утилиты Tailwind и многоэлементный Markdown-промпт.',
-    linesSavedOrImpact: 'Пакетная отправка N элементов за 1 действие вместо ручного копирования по одному',
+    title: 'Генератор диффов (Было → Стало) и Пакетная очередь',
+    role: 'Вычисляет дельту изменений между исходным состоянием DOM и настройками, формируя утилиты Tailwind.',
+    linesSavedOrImpact: 'Пакетная отправка N элементов за 1 действие',
     code: `// Вычисление диффа стилей и формирование сводного промпта для Antigravity IDE
 export function computeStyleDiff(initial: StyleTunerState, current: StyleTunerState) {
   const diffs = [];
@@ -116,9 +124,9 @@ export function computeStyleDiff(initial: StyleTunerState, current: StyleTunerSt
   {
     id: 'workspace-bridge-api',
     filename: 'app/api/antigravity-bridge/route.ts',
-    title: 'Серверный мост синхронизации с рабочей областью Antigravity',
-    role: 'Автоматически определяет локальный IPv4 адрес Wi-Fi сети через os.networkInterfaces() и записывает пакет визуальных правок в файл ANTIGRAVITY_TASKS.md.',
-    linesSavedOrImpact: 'Авто-определение LAN IP · Прямая запись очереди задач в проект',
+    title: 'Серверный мост синхронизации с рабочей областью',
+    role: 'Определяет локальный IPv4 адрес Wi-Fi сети и записывает пакет визуальных правок в ANTIGRAVITY_TASKS.md.',
+    linesSavedOrImpact: 'Авто-определение LAN IP · Прямая запись очереди',
     code: `// app/api/antigravity-bridge/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import os from 'node:os';
@@ -139,10 +147,10 @@ export async function POST(req: NextRequest) {
   {
     id: 'visual-layer-builder',
     filename: 'lib/dom-layer-engine.ts',
-    title: 'Визуальный конструктор слоёв (Drag, 8-Handle Resize, Group/Ungroup, Reorder)',
-    role: 'Декомпозирует экран приложения на дерево слоёв, рендерит интерактивную рамку трансформации с 8 маркерами растягивания и позволяет группировать/разгруппировывать и менять узлы местами в живом DOM.',
-    linesSavedOrImpact: 'Прямое манипулирование макетом как в Figma / Webflow с генерацией Tailwind-классов',
-    code: `// Группировка, разгруппировка и перестановка слоёв в живом DOM iframe
+    title: 'Визуальный конструктор слоёв',
+    role: 'Декомпозирует экран на дерево слоёв, позволяя группировать и менять узлы местами в живом DOM.',
+    linesSavedOrImpact: 'Манипулирование макетом в реальном времени с Tailwind',
+    code: `// Группировка и перестановка слоёв в живом DOM
 export function groupDomLayers(doc: Document, layerIds: string[], groupName = 'Group_1') {
   const elements = layerIds
     .map((id) => doc.querySelector(\`[data-ag-layer-id="\${id}"]\`) as HTMLElement)
@@ -159,20 +167,6 @@ export function groupDomLayers(doc: Document, layerIds: string[], groupName = 'G
   elements[0].parentElement.insertBefore(wrapper, elements[0]);
   elements.forEach((el) => wrapper.appendChild(el));
   return wrapper;
-}
-
-export function swapDomLayerOrder(doc: Document, layerId: string, direction: 'up' | 'down') {
-  const el = doc.querySelector(\`[data-ag-layer-id="\${layerId}"]\`) as HTMLElement | null;
-  if (!el || !el.parentElement) return false;
-  if (direction === 'up' && el.previousElementSibling) {
-    el.parentElement.insertBefore(el, el.previousElementSibling);
-    return true;
-  }
-  if (direction === 'down' && el.nextElementSibling) {
-    el.parentElement.insertBefore(el.nextElementSibling, el);
-    return true;
-  }
-  return false;
 }`,
   },
 ];
@@ -180,6 +174,7 @@ export function swapDomLayerOrder(doc: Document, layerId: string, direction: 'up
 export function CodeBlueprintView({ isDark }: { isDark: boolean }) {
   const [selectedModuleId, setSelectedModuleId] = useState<string>(MODULES_CATALOG[0].id);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [openCode, setOpenCode] = useState(true);
 
   const activeModule = MODULES_CATALOG.find((m) => m.id === selectedModuleId) || MODULES_CATALOG[0];
 
@@ -189,101 +184,155 @@ export function CodeBlueprintView({ isDark }: { isDark: boolean }) {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
+  const borderMuted = isDark ? 'border-[#26262B]' : 'border-zinc-200';
+  const cardBg = isDark ? 'bg-[#0E0E11]' : 'bg-zinc-50';
+
   return (
-    <div className="space-y-6">
+    <div className="divide-y divide-[#26262B]">
+      {/* TOP ACTIONS / MODULE SELECTOR (MATCHING SCREEN 5 INSPECTOR HEADER) */}
+      <div className="pb-2.5 space-y-2">
+        {/* Full-width primary copy button */}
+        <button
+          type="button"
+          onClick={() => handleCopyCode(activeModule.id, activeModule.code)}
+          title="Скопировать исходный код выбранного модуля"
+          className={`w-full h-7 px-2.5 rounded-md text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+            copiedId === activeModule.id
+              ? 'bg-emerald-500 text-white font-semibold shadow-xs'
+              : isDark
+              ? 'bg-zinc-100 text-zinc-950 font-semibold shadow-xs hover:bg-white'
+              : 'bg-zinc-900 text-white font-semibold shadow-xs hover:bg-zinc-800'
+          }`}
+        >
+          {copiedId === activeModule.id ? (
+            <>
+              <Check className="w-3.5 h-3.5" />
+              <span>Код скопирован в буфер!</span>
+            </>
+          ) : (
+            <>
+              <Copy className="w-3.5 h-3.5" />
+              <span>Копировать код модуля ({activeModule.filename.split('/').pop()})</span>
+            </>
+          )}
+        </button>
 
-      {/* SECTION 2: DROP-IN MODULES CODE EXPORTER */}
-      <div
-        className={`p-5 rounded-2xl border ${
-          isDark ? 'bg-[#11111C] border-white/10' : 'bg-white border-slate-200'
-        }`}
-      >
-        <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-200 dark:border-white/10">
-          <div>
-            <h2 className="text-base font-bold tracking-tight flex items-center gap-2">
-              <FileCode className="w-4 h-4 text-[#B833FF]" />
-              <span>Готовые модули кода для переноса в GitHub-репозиторий</span>
-            </h2>
-            <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-              Выберите модуль, чтобы просмотреть или скопировать чистый TypeScript-код для прямой интеграции в проект
-            </p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 mt-4">
-          {/* Left selector */}
-          <div className="lg:col-span-4 space-y-2">
-            {MODULES_CATALOG.map((mod) => {
-              const isSelected = mod.id === activeModule.id;
-              return (
-                <button
-                  key={mod.id}
-                  type="button"
-                  onClick={() => setSelectedModuleId(mod.id)}
-                  className={`w-full text-left p-3.5 rounded-xl border transition-all cursor-pointer ${
-                    isSelected
-                      ? 'bg-[#B833FF]/15 border-[#B833FF] text-white'
-                      : isDark
-                      ? 'bg-[#161625] border-white/10 text-slate-300 hover:border-white/25'
-                      : 'bg-slate-50 border-slate-200 text-slate-800 hover:border-slate-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-bold text-[#B833FF]">{mod.filename}</span>
-                    <ArrowRight className="w-3.5 h-3.5 opacity-60" />
-                  </div>
-                  <div className={`text-xs font-bold mt-1 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
-                    {mod.title}
-                  </div>
-                  <p className={`text-[11px] mt-1 line-clamp-2 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                    {mod.role}
-                  </p>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Right code viewer */}
-          <div className="lg:col-span-8 flex flex-col">
-            <div
-              className={`p-4 rounded-xl border flex-1 flex flex-col ${
-                isDark ? 'bg-[#090910] border-white/10' : 'bg-slate-900 border-slate-800 text-slate-100'
+        {/* Quick Module Chips (matching Screen 5 quick chips) */}
+        <div className="grid grid-cols-3 gap-1">
+          {[
+            { id: 'haptics-singleton', label: 'haptics.ts' },
+            { id: 'raf-inspector', label: 'inspector.ts' },
+            { id: 'prompt-queue-diff', label: 'core.ts' },
+          ].map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setSelectedModuleId(item.id)}
+              className={`h-6 rounded border text-[10px] font-mono cursor-pointer transition-colors truncate px-1 ${
+                selectedModuleId === item.id
+                  ? isDark
+                    ? 'bg-zinc-200 text-zinc-950 border-zinc-200 font-semibold'
+                    : 'bg-zinc-900 text-white border-zinc-900 font-semibold'
+                  : isDark
+                  ? 'bg-[#18181C] border-[#27272A] text-zinc-400 hover:text-zinc-100'
+                  : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-100'
               }`}
             >
-              <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-3 border-b border-white/10">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <Terminal className="w-4 h-4 text-[#B833FF]" />
-                    <span className="font-mono text-xs font-bold text-white">{activeModule.filename}</span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mt-0.5">{activeModule.linesSavedOrImpact}</p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => handleCopyCode(activeModule.id, activeModule.code)}
-                  className="px-3 py-1.5 rounded-lg bg-[#B833FF] hover:bg-[#a224e6] text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
-                >
-                  {copiedId === activeModule.id ? (
-                    <>
-                      <Check className="w-3.5 h-3.5" />
-                      <span>Скопировано</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>Копировать код модуля</span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-              <pre className="text-xs font-mono text-slate-200 overflow-x-auto leading-relaxed flex-1">
-                <code>{activeModule.code}</code>
-              </pre>
-            </div>
-          </div>
+              {item.label}
+            </button>
+          ))}
         </div>
+
+        {/* Dropdown for all modules */}
+        <select
+          aria-label="Выбрать модуль кода"
+          value={selectedModuleId}
+          onChange={(e) => setSelectedModuleId(e.target.value)}
+          className={`w-full h-6 px-2 rounded border text-[10px] font-mono cursor-pointer ${
+            isDark ? 'bg-[#18181C] border-[#27272A] text-zinc-300' : 'bg-white border-zinc-200 text-zinc-800'
+          }`}
+        >
+          {MODULES_CATALOG.map((mod) => (
+            <option key={mod.id} value={mod.id}>
+              {mod.filename} — {mod.title}
+            </option>
+          ))}
+        </select>
+
+        {/* Selected Module Card (styled like Selected Element Card in Screen 5) */}
+        <div className={`p-2 rounded-lg border space-y-1.5 ${borderMuted} ${cardBg}`}>
+          <div className="flex items-center justify-between gap-1.5">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="font-mono text-xs font-semibold text-purple-400">
+                {activeModule.filename}
+              </span>
+            </div>
+            <span className="text-[10px] font-mono text-zinc-500 shrink-0">
+              TypeScript
+            </span>
+          </div>
+
+          <div className="text-xs font-semibold text-zinc-200 leading-snug">
+            {activeModule.title}
+          </div>
+
+          <div className="text-[10px] font-mono text-purple-300">
+            {activeModule.linesSavedOrImpact}
+          </div>
+
+          <p className={`text-[11px] leading-snug ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
+            {activeModule.role}
+          </p>
+        </div>
+      </div>
+
+      {/* SECTION 1: CODE BLOCK (ACCORDION) */}
+      <div className="py-2">
+        <div className="flex items-center justify-between h-7 mb-1.5">
+          <button
+            type="button"
+            onClick={() => setOpenCode((v) => !v)}
+            title="Свернуть или развернуть блок кода"
+            className="flex items-center gap-1.5 text-xs font-semibold cursor-pointer select-none"
+          >
+            {openCode ? (
+              <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+            ) : (
+              <ChevronRight className="w-3.5 h-3.5 text-zinc-400" />
+            )}
+            <Code2 className="w-3.5 h-3.5 text-purple-400" />
+            <span>Исходный код</span>
+            <span className="text-[11px] font-mono text-zinc-500 font-normal">
+              {activeModule.code.split('\n').length} строк
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleCopyCode(activeModule.id, activeModule.code)}
+            title="Копировать код"
+            className={`h-6 px-1.5 rounded text-[10px] font-medium flex items-center gap-1 cursor-pointer ${
+              isDark
+                ? 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
+                : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100'
+            }`}
+          >
+            <Copy className="w-3 h-3" />
+            <span>Копировать</span>
+          </button>
+        </div>
+
+        {openCode && (
+          <div className="space-y-1.5">
+            <pre
+              className={`p-3 rounded-lg border font-mono text-[11px] leading-relaxed max-h-[460px] overflow-auto select-text scrollbar-thin ${borderMuted} ${
+                isDark ? 'bg-[#0E0E11] text-zinc-300' : 'bg-zinc-900 text-zinc-100'
+              }`}
+            >
+              <code>{activeModule.code}</code>
+            </pre>
+          </div>
+        )}
       </div>
     </div>
   );

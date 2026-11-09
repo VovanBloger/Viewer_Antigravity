@@ -2196,117 +2196,109 @@ export default function ViewerAntigravityWorkbench() {
                 />
               )}
               {dockTab === 'queue' && (
-                <div className="overflow-y-auto">
-                  <AgentQueueView
-                    queue={agentQueue}
-                    isDark={isDark}
-                    workspaceMeta={workspaceMeta}
-                    onUpdateItem={(id, patch) =>
-                      setAgentQueue((prev) =>
-                        prev.map((item) => (item.id === id ? { ...item, ...patch } : item))
-                      )
-                    }
-                    onRemoveItem={(id) => setAgentQueue((prev) => prev.filter((item) => item.id !== id))}
-                    onClearQueue={() => setAgentQueue([])}
-                    onAddSampleTask={() => {
-                      const nextPin = agentQueue.length + 1;
-                      setAgentQueue((prev) => [
-                        ...prev,
-                        {
-                          id: `sample-${Date.now()}`,
-                          pinNumber: nextPin,
-                          createdAt: new Date().toLocaleTimeString('ru-RU'),
-                          slotDeviceName: 'Galaxy S24 Ultra',
-                          priority: 'high',
-                          directiveId: 'safe-area',
-                          note: 'Увеличить нижний отступ навигации с учётом Safe Area на Android и iOS',
-                          element: {
-                            tag: 'nav',
-                            className: 'fixed bottom-0 inset-x-0 h-16 bg-[#151421]/95',
-                            textSnippet: 'Лента · Витрина · Создать · Профиль',
-                            rect: { top: 788, left: 0, width: 393, height: 64 },
-                            selector: 'div > nav.fixed.bottom-0',
-                            componentName: 'BottomTabNav',
-                            sourceFile: 'components/demo/DemoApp.tsx',
-                            sourceLine: 500,
-                          },
-                          diffs: [
-                            {
-                              property: 'Высота',
-                              before: '64px',
-                              after: '76px',
-                              tailwindSuggestion: 'h-[76px] pb-safe',
-                            },
-                          ],
+                <AgentQueueView
+                  queue={agentQueue}
+                  isDark={isDark}
+                  workspaceMeta={workspaceMeta}
+                  onUpdateItem={(id, patch) =>
+                    setAgentQueue((prev) =>
+                      prev.map((item) => (item.id === id ? { ...item, ...patch } : item))
+                    )
+                  }
+                  onRemoveItem={(id) => setAgentQueue((prev) => prev.filter((item) => item.id !== id))}
+                  onClearQueue={() => setAgentQueue([])}
+                  onAddSampleTask={() => {
+                    const nextPin = agentQueue.length + 1;
+                    setAgentQueue((prev) => [
+                      ...prev,
+                      {
+                        id: `sample-${Date.now()}`,
+                        pinNumber: nextPin,
+                        createdAt: new Date().toLocaleTimeString('ru-RU'),
+                        slotDeviceName: 'Galaxy S24 Ultra',
+                        priority: 'high',
+                        directiveId: 'safe-area',
+                        note: 'Увеличить нижний отступ навигации с учётом Safe Area на Android и iOS',
+                        element: {
+                          tag: 'nav',
+                          className: 'fixed bottom-0 inset-x-0 h-16 bg-[#151421]/95',
+                          textSnippet: 'Лента · Витрина · Создать · Профиль',
+                          rect: { top: 788, left: 0, width: 393, height: 64 },
+                          selector: 'div > nav.fixed.bottom-0',
+                          componentName: 'BottomTabNav',
+                          sourceFile: 'components/demo/DemoApp.tsx',
+                          sourceLine: 500,
                         },
-                      ]);
-                    }}
-                  />
-                </div>
+                        diffs: [
+                          {
+                            property: 'Высота',
+                            before: '64px',
+                            after: '76px',
+                            tailwindSuggestion: 'h-[76px] pb-safe',
+                          },
+                        ],
+                      },
+                    ]);
+                  }}
+                />
               )}
 
               {dockTab === 'audit' && (
-                <div className="overflow-y-auto">
-                  <LayoutAuditView
-                    issues={auditIssues}
-                    isDark={isDark}
-                    tgEnv={tgEnv}
-                    hapticLogs={hapticLogs}
-                    onUpdateTgEnv={updateTgEnv}
-                    onRunAudit={handleRunLayoutAudit}
-                    onEnqueueIssue={(issue) => {
-                      const nextPin =
-                        agentQueue.length > 0 ? Math.max(...agentQueue.map((i) => i.pinNumber)) + 1 : 1;
-                      setAgentQueue((prev) => [
-                        ...prev,
-                        {
-                          id: `audit-task-${Date.now()}`,
-                          pinNumber: nextPin,
-                          createdAt: new Date().toLocaleTimeString('ru-RU'),
-                          slotDeviceName: 'Layout Linter',
-                          priority: issue.severity === 'error' ? 'high' : 'normal',
-                          directiveId: issue.category === 'overflow-x' ? 'responsive-320' : 'safe-area',
-                          note: `${issue.title}: ${issue.suggestedFix}`,
-                          element: {
-                            tag: 'div',
-                            className: '',
-                            textSnippet: issue.description,
-                            rect: issue.rect,
-                            selector: issue.selector,
-                            componentName: issue.componentName,
-                            sourceFile: issue.sourceFile,
-                            sourceLine: issue.sourceLine,
-                          },
-                          diffs: [],
+                <LayoutAuditView
+                  issues={auditIssues}
+                  isDark={isDark}
+                  tgEnv={tgEnv}
+                  hapticLogs={hapticLogs}
+                  onUpdateTgEnv={updateTgEnv}
+                  onRunAudit={handleRunLayoutAudit}
+                  onEnqueueIssue={(issue) => {
+                    const nextPin =
+                      agentQueue.length > 0 ? Math.max(...agentQueue.map((i) => i.pinNumber)) + 1 : 1;
+                    setAgentQueue((prev) => [
+                      ...prev,
+                      {
+                        id: `audit-task-${Date.now()}`,
+                        pinNumber: nextPin,
+                        createdAt: new Date().toLocaleTimeString('ru-RU'),
+                        slotDeviceName: 'Layout Linter',
+                        priority: issue.severity === 'error' ? 'high' : 'normal',
+                        directiveId: issue.category === 'overflow-x' ? 'responsive-320' : 'safe-area',
+                        note: `${issue.title}: ${issue.suggestedFix}`,
+                        element: {
+                          tag: 'div',
+                          className: '',
+                          textSnippet: issue.description,
+                          rect: issue.rect,
+                          selector: issue.selector,
+                          componentName: issue.componentName,
+                          sourceFile: issue.sourceFile,
+                          sourceLine: issue.sourceLine,
                         },
-                      ]);
-                      setDockTab('queue');
-                    }}
-                    onClearHapticLogs={() => setHapticLogs([])}
-                  />
-                </div>
+                        diffs: [],
+                      },
+                    ]);
+                    setDockTab('queue');
+                  }}
+                  onClearHapticLogs={() => setHapticLogs([])}
+                />
               )}
 
               {dockTab === 'code' && (
-                <div className="overflow-y-auto">
-                  <CodeBlueprintView isDark={isDark} />
-                </div>
+                <CodeBlueprintView isDark={isDark} />
               )}
 
               {dockTab === 'settings' && (
-                <div className="overflow-y-auto">
-                  <HotkeysThemeView
-                    hotkeys={hotkeys}
-                    onUpdateHotkey={(id, newCombo) =>
-                      setHotkeys((prev) =>
-                        prev.map((h) => (h.id === id ? { ...h, combo: newCombo } : h))
-                      )
-                    }
-                    onResetHotkeys={() => setHotkeys(DEFAULT_HOTKEYS)}
-                    onApplyPreset={handleApplyPreset}
-                    isDark={isDark}
-                  />
-                </div>
+                <HotkeysThemeView
+                  hotkeys={hotkeys}
+                  onUpdateHotkey={(id, newCombo) =>
+                    setHotkeys((prev) =>
+                      prev.map((h) => (h.id === id ? { ...h, combo: newCombo } : h))
+                    )
+                  }
+                  onResetHotkeys={() => setHotkeys(DEFAULT_HOTKEYS)}
+                  onApplyPreset={handleApplyPreset}
+                  isDark={isDark}
+                />
               )}
             </aside>
 
