@@ -1,20 +1,22 @@
 {
-  "name": "viewer-antigravity",
-  "version": "1.0.0",
-  "description": "Next-Gen Multi-Device Responsive Preview & Live Visual Inspection Studio for Telegram Mini Apps & Web Apps",
-  "author": "VovanBloger",
-  "license": "MIT",
+  "name": "ai-studio-applet",
+  "version": "0.1.0",
+  "private": true,
   "scripts": {
-    "dev": "next dev -p 3000",
+    "dev": "next dev -p 3100",
     "build": "next build",
-    "start": "next start",
-    "lint": "eslint ."
+    "start": "next start -p 3100",
+    "lint": "eslint .",
+    "test": "node --test --import tsx lib/antigravity-core.test.ts",
+    "clean": "next clean"
   },
   "dependencies": {
+    "@types/qrcode": "^1.5.6",
+    "autoprefixer": "^10.4.21",
     "clsx": "^2.1.1",
     "lucide-react": "^0.553.0",
-    "motion": "^12.23.24",
     "next": "^15.4.9",
+    "postcss": "^8.5.6",
     "qrcode": "^1.5.4",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
@@ -23,11 +25,12 @@
   "devDependencies": {
     "@tailwindcss/postcss": "4.1.11",
     "@types/node": "^20",
-    "@types/qrcode": "^1.5.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "postcss": "^8.5.6",
+    "eslint": "9.39.1",
+    "eslint-config-next": "16.0.8",
     "tailwindcss": "4.1.11",
+    "tsx": "^4.19.3",
     "typescript": "5.9.3"
   }
 }

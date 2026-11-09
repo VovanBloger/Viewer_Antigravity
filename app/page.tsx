@@ -1,10 +1,111 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
-import QRCode from 'qrcode';
-import { Sun, Moon } from 'lucide-react';
-import { PREVIEW_DEVICES, DeviceSpec, CANVAS_BACKGROUNDS } from '@/lib/preview-devices';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Crosshair,
+  Plus,
+  Smartphone,
+  RefreshCw,
+  Maximize2,
+  Copy,
+  Check,
+  Undo2,
+  Redo2,
+  Layers,
+  ArrowUp,
+  ArrowDown,
+  EyeOff,
+  Eye,
+  Command,
+  Ruler,
+  Wifi,
+  FileCode,
+  PanelLeft,
+  PanelRight,
+  ChevronDown,
+  ChevronRight,
+  Sun,
+  Moon,
+  ShieldCheck,
+  ListTodo,
+  Code2,
+  Settings,
+} from 'lucide-react';
+import {
+  PREVIEW_DEVICES,
+  WORKSPACE_PRESETS,
+  ANTIGRAVITY_THEMES,
+  DEFAULT_HOTKEYS,
+  AntigravityTheme,
+  HotkeyBinding,
+} from '@/lib/preview-devices';
+import {
+  hapticAudioEngine,
+  ImpactStyle,
+  HapticEventRecord,
+} from '@/lib/haptics';
+import {
+  StyleTunerState,
+  DEFAULT_TUNER_STATE,
+  LayerSummary,
+  ElementInfo,
+  AgentQueueItem,
+  LayoutAuditIssue,
+  SMART_AGENT_DIRECTIVES,
+  computeStyleDiff,
+  buildConsolidatedAgentPrompt,
+  buildIdeDeepLink,
+  calculateFitZoom,
+} from '@/lib/antigravity-core';
+import {
+  getReactSourceInfo,
+  getBoxModelMetrics,
+  buildDomSelectorPath,
+  updateSelectedOverlay,
+  clearSelectedOverlay,
+  scanIframeForAuditIssues,
+} from '@/lib/dom-inspector';
 import { PhoneSlot } from '@/components/preview/PhoneSlot';
+import { AgentQueueView } from '@/components/workbench/AgentQueueView';
+import { LayoutAuditView } from '@/components/workbench/LayoutAuditView';
+import { HotkeysThemeView } from '@/components/workbench/HotkeysThemeView';
+import { CodeBlueprintView } from '@/components/workbench/CodeBlueprintView';
+import { LayerBuilderDock } from '@/components/workbench/LayerBuilderDock';
+import { CommandPaletteModal, MobileTunnelModal } from '@/components/workbench/CommandPaletteModal';
+import { TechnicalScreenshotModal } from '@/components/workbench/TechnicalScreenshotModal';
+import { TgSimulatedEnv } from '@/components/demo/DemoApp';
+import {
+  DesignLayerNode,
+  DesignLayerTransform,
+  BuilderOperationRecord,
+  formatLayerBuilderDiff,
+} from '@/lib/layer-builder';
+import {
+  extractIframeDesignLayers,
+  ensureLayerAttributes,
+  findDomElementByLayerId,
+  restoreAllDomHiddenLayers,
+  countDomHiddenLayers,
+  applyLayerTransformToDom,
+  updateDomLayerText,
+  updateDomLayerTextColor,
+  updateDomLayerBgColor,
+  updateDomLayerIcon,
+  renderScreenSurfaceCanvas,
+  sampleScreenColorAtPoint,
+  swapDomLayerOrder,
+  groupDomLayers,
+  ungroupDomLayer,
+  duplicateDomLayer,
+  toggleDomLayerVisibility,
+  toggleDomLayerLock,
+  resetAllDomLayerTransforms,
+  syncBuilderGizmoInIframe,
+} from '@/lib/dom-layer-engine';
+import {
+  captureVisualTechnicalScreenshot,
+  VisualTechnicalScreenshotResult,
+} from '@/lib/screenshot-engine';
 
 interface DeviceSlotState {
   id: string;
@@ -12,705 +113,481 @@ interface DeviceSlotState {
   rotated: boolean;
 }
 
-interface LayerSummary {
-  tag: string;
-  className: string;
-  textSnippet: string;
-  componentName?: string;
-  sourceFile?: string;
-  sourceLine?: number;
-  width: number;
-  height: number;
-  roleHint?: string;
-}
+export type DockTab = 'layers' | 'queue' | 'audit' | 'code' | 'settings';
+type ActiveSection = 'canvas' | 'queue' | 'audit' | 'settings' | 'code';
 
-interface ElementInfo {
-  tag: string;
-  id?: string;
-  className: string;
-  textSnippet: string;
-  rect: { top: number; left: number; width: number; height: number };
-  selector: string;
-  componentName?: string;
-  sourceFile?: string;
-  sourceLine?: number;
-  layerIndex?: number;
-  totalLayers?: number;
-  coveringTag?: string;
-}
-
-interface StyleTunerState {
-  bgOpacity: number; // 0 - 100% (только для фона, не трогая дочерние элементы!)
-  widthVal: number;
-  widthUnit: 'px' | '%' | 'auto';
-  heightVal: number;
-  heightUnit: 'px' | '%' | 'dvh' | 'auto';
-  radiusVal: number;
-  align: 'left' | 'center' | 'right' | 'none'; // выравнивание по левому/правому краю и по центру
-}
-
-const DEFAULT_TUNER_STATE: StyleTunerState = {
-  bgOpacity: 0,
-  widthVal: 386,
-  widthUnit: 'px',
-  heightVal: 90,
-  heightUnit: 'px',
-  radiusVal: 0,
-  align: 'none',
-};
-
-/**
- * Извлекает имя React-компонента, имя файла и строку из Fiber в dev-режиме Next.js
- */
-function getReactSourceInfo(target: any): { componentName?: string; sourceFile?: string; sourceLine?: number } {
-  try {
-    if (!target) return {};
-    const fiberKey = Object.keys(target).find(
-      k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
-    );
-    if (!fiberKey) return {};
-
-    const fiber = target[fiberKey];
-    let sourceFile: string | undefined;
-    let sourceLine: number | undefined;
-    let componentName: string | undefined;
-
-    let curr = fiber;
-    let depth = 0;
-    while (curr && depth < 20) {
-      const src = curr._debugSource || curr._source || curr.memoizedProps?.__source || curr._debugOwner?._debugSource;
-      if (src && !sourceFile) {
-        sourceFile = src.fileName || src.file;
-        sourceLine = src.lineNumber || src.line;
-      }
-
-      if (!componentName && typeof curr.type === 'function') {
-        const name = curr.type.displayName || curr.type.name;
-        if (name && name !== 'Anonymous') {
-          componentName = name;
-        }
-      } else if (!componentName && curr._debugOwner && typeof curr._debugOwner.type === 'function') {
-        const name = curr._debugOwner.type.displayName || curr._debugOwner.type.name;
-        if (name && name !== 'Anonymous') {
-          componentName = name;
-        }
-      }
-
-      if (sourceFile && componentName) break;
-      curr = curr.return;
-      depth++;
+export default function ViewerAntigravityWorkbench() {
+  // Active Workbench Dock Tab (Canvas stays permanently open, dock switches views)
+  const [dockTab, setDockTab] = useState<DockTab>('layers');
+  const activeSection: ActiveSection = dockTab === 'layers' ? 'canvas' : dockTab;
+  const setActiveSection = useCallback((s: string) => {
+    if (s === 'canvas') setDockTab('layers');
+    else if (s === 'queue' || s === 'audit' || s === 'code' || s === 'settings') {
+      setDockTab(s as DockTab);
     }
+  }, []);
 
-    if (!sourceFile && fiber?._debugStack) {
-      try {
-        const stackStr = String(fiber._debugStack);
-        const match = stackStr.match(/(?:at\s+)?([^\s()]+):(\d+):(\d+)/) || stackStr.match(/\((.+?):(\d+):(\d+)\)/);
-        if (match) {
-          sourceFile = match[1];
-          sourceLine = parseInt(match[2], 10);
-        }
-      } catch {}
+  // Theme & Hotkeys State
+  const [themeKey, setThemeKey] = useState<AntigravityTheme['key']>('obsidian');
+  const [hotkeys, setHotkeys] = useState<HotkeyBinding[]>(DEFAULT_HOTKEYS);
+
+  const currentTheme = ANTIGRAVITY_THEMES[themeKey] || ANTIGRAVITY_THEMES.obsidian;
+  const isDark = currentTheme.isDark;
+
+  // Sync html.dark class for Tailwind v4 @custom-variant dark
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.classList.toggle('dark', isDark);
     }
+  }, [isDark]);
 
-    if (sourceFile) {
-      sourceFile = sourceFile.replace(/\\/g, '/');
-      const parts = sourceFile.split('/');
-      const componentsIdx = parts.lastIndexOf('components');
-      const appIdx = parts.lastIndexOf('app');
-      const libIdx = parts.lastIndexOf('lib');
-      const bestIdx = Math.max(componentsIdx, appIdx, libIdx);
-      if (bestIdx !== -1) {
-        sourceFile = parts.slice(bestIdx).join('/');
-      }
-    }
-
-    return { componentName, sourceFile, sourceLine };
-  } catch {
-    return {};
-  }
-}
-
-/**
- * Управляет постоянной зеленой подсветкой выбранного элемента внутри iframe
- */
-function updateSelectedOverlay(target: HTMLElement, doc: Document) {
-  try {
-    let selOverlay = doc.getElementById('__antigravity_selected_overlay__');
-    if (!selOverlay) {
-      selOverlay = doc.createElement('div');
-      selOverlay.id = '__antigravity_selected_overlay__';
-      selOverlay.style.position = 'fixed';
-      selOverlay.style.pointerEvents = 'none';
-      selOverlay.style.zIndex = '999998';
-      selOverlay.style.border = '2px solid #10B981';
-      selOverlay.style.background = 'rgba(16, 185, 129, 0.16)';
-      selOverlay.style.borderRadius = '6px';
-      selOverlay.style.transition = 'all 80ms ease-out';
-      selOverlay.style.boxShadow = '0 0 0 1px rgba(0,0,0,0.4), 0 0 14px rgba(16, 185, 129, 0.45)';
-
-      const badge = doc.createElement('div');
-      badge.id = '__antigravity_selected_badge__';
-      badge.style.position = 'absolute';
-      badge.style.bottom = '100%';
-      badge.style.left = '0';
-      badge.style.marginBottom = '4px';
-      badge.style.background = '#064E3B';
-      badge.style.color = '#A7F3D0';
-      badge.style.border = '1px solid #10B981';
-      badge.style.fontSize = '10px';
-      badge.style.fontFamily = 'ui-monospace, monospace';
-      badge.style.fontWeight = 'bold';
-      badge.style.padding = '2px 8px';
-      badge.style.borderRadius = '6px';
-      badge.style.whiteSpace = 'nowrap';
-      badge.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
-      selOverlay.appendChild(badge);
-
-      doc.body.appendChild(selOverlay);
-    }
-    const r = target.getBoundingClientRect();
-    selOverlay.style.display = 'block';
-    selOverlay.style.top = `${r.top}px`;
-    selOverlay.style.left = `${r.left}px`;
-    selOverlay.style.width = `${r.width}px`;
-    selOverlay.style.height = `${r.height}px`;
-
-    const badge = doc.getElementById('__antigravity_selected_badge__');
-    if (badge) {
-      badge.textContent = `<${target.tagName.toLowerCase()}> ${Math.round(r.width)}×${Math.round(r.height)}px`;
-    }
-  } catch {}
-}
-
-function clearSelectedOverlay(doc?: Document | null) {
-  try {
-    if (!doc) return;
-    const el = doc.getElementById('__antigravity_selected_overlay__');
-    if (el) el.remove();
-  } catch {}
-}
-
-export default function LivePreviewPage() {
-  const [bgKey, setBgKey] = useState('cyber');
-  const [showBezel, setShowBezel] = useState(true);
-  const [zoom, setZoom] = useState(1);
-  const [showZoomSlider, setShowZoomSlider] = useState(false);
-  const [targetUrl, setTargetUrl] = useState<string>('/demo');
-  const [inputUrl, setInputUrl] = useState<string>('/demo');
-  const [isInspectMode, setIsInspectMode] = useState(false);
-  const [selectedElement, setSelectedElement] = useState<ElementInfo | null>(null);
-  const [liveClasses, setLiveClasses] = useState('');
-  const inspectedTargetRef = useRef<HTMLElement | null>(null);
-  const [noteText, setNoteText] = useState('');
-  const [copied, setCopied] = useState(false);
-
-  // Слои под курсором (elementsFromPoint) & управление перекрывающими слоями
-  const [layers, setLayers] = useState<LayerSummary[]>([]);
-  const [activeLayerIndex, setActiveLayerIndex] = useState<number>(0);
-  const stackedElementsRef = useRef<HTMLElement[]>([]);
-  const inspectedDocRef = useRef<Document | null>(null);
-  const hiddenElementsRef = useRef<Array<{ el: HTMLElement; prevDisplay: string; prevPointerEvents: string }>>([]);
-  const [hiddenCount, setHiddenCount] = useState<number>(0);
-  const [inspectedSlotName, setInspectedSlotName] = useState<string>('');
-
-  // Визуальные регуляторы стиля (прозрачность, заливка, размеры, скругление)
-  const [tunerState, setTunerState] = useState<StyleTunerState>(DEFAULT_TUNER_STATE);
-
-  const applyTunerStyle = (changes: Partial<StyleTunerState>) => {
-    const next = { ...tunerState, ...changes };
-    setTunerState(next);
-
-    const el = inspectedTargetRef.current;
-    const doc = inspectedDocRef.current;
-    if (!el) return;
-
-    // ВАЖНО: Ни в коем случае не трогаем общую прозрачность элемента (el.style.opacity),
-    // чтобы иконки, текст и дочерние элементы оставались на 100% чёткими!
-    el.style.opacity = '1';
-
-    // 1. Прозрачность фона / заливки (ТОЛЬКО для фона, не затрагивая детей)
-    if (changes.bgOpacity !== undefined) {
-      if (next.bgOpacity === 0) {
-        el.style.background = 'transparent';
-        el.style.backgroundColor = 'transparent';
-        el.style.backgroundImage = 'none';
-        if (el.tagName.toLowerCase() === 'path' || el.tagName.toLowerCase() === 'svg') {
-          el.style.fill = 'transparent';
-          el.setAttribute('fill', 'transparent');
-        }
-        // Затрагиваем только фон панели SVG, НЕ трогая иконки и текст внутри кнопок
-        el.querySelectorAll('path, svg').forEach((s) => {
-          if (!s.closest('button, .nav-tab-btn, [role="button"]')) {
-            (s as HTMLElement).style.fill = 'transparent';
-            s.setAttribute('fill', 'transparent');
-          }
-        });
-        el.querySelectorAll('linearGradient stop').forEach((st) => {
-          st.setAttribute('stop-opacity', '0');
-          st.setAttribute('stop-color', 'transparent');
-        });
-      } else {
-        const alpha = (next.bgOpacity / 100).toFixed(2);
-        el.style.backgroundColor = isDark ? `rgba(28, 20, 48, ${alpha})` : `rgba(255, 255, 255, ${alpha})`;
-        el.style.backgroundImage = 'none';
-        if (el.tagName.toLowerCase() === 'path' || el.tagName.toLowerCase() === 'svg') {
-          el.style.fill = isDark ? `rgba(28, 20, 48, ${alpha})` : `rgba(255, 255, 255, ${alpha})`;
-          el.setAttribute('fill', isDark ? `rgba(28, 20, 48, ${alpha})` : `rgba(255, 255, 255, ${alpha})`);
-        }
-        el.querySelectorAll('path, svg').forEach((s) => {
-          if (!s.closest('button, .nav-tab-btn, [role="button"]')) {
-            (s as HTMLElement).style.fill = isDark ? `rgba(28, 20, 48, ${alpha})` : `rgba(255, 255, 255, ${alpha})`;
-            s.setAttribute('fill', isDark ? `rgba(28, 20, 48, ${alpha})` : `rgba(255, 255, 255, ${alpha})`);
-          }
-        });
-        el.querySelectorAll('linearGradient stop').forEach((st) => {
-          st.setAttribute('stop-opacity', alpha);
-        });
-      }
-    }
-
-    // 2. Выравнивание (по левому/правому краю и по центру)
-    if (changes.align !== undefined) {
-      if (next.align === 'left') {
-        el.style.textAlign = 'left';
-        el.style.alignSelf = 'flex-start';
-        el.style.justifySelf = 'start';
-      } else if (next.align === 'center') {
-        el.style.textAlign = 'center';
-        el.style.alignSelf = 'center';
-        el.style.justifySelf = 'center';
-      } else if (next.align === 'right') {
-        el.style.textAlign = 'right';
-        el.style.alignSelf = 'flex-end';
-        el.style.justifySelf = 'end';
-      } else {
-        el.style.textAlign = '';
-        el.style.alignSelf = '';
-        el.style.justifySelf = '';
-      }
-    }
-
-    // 3. Ширина
-    if (changes.widthVal !== undefined || changes.widthUnit !== undefined) {
-      if (next.widthUnit === 'auto') {
-        el.style.width = 'auto';
-      } else if (next.widthUnit === '%') {
-        el.style.width = `${next.widthVal}%`;
-      } else {
-        el.style.width = `${next.widthVal}px`;
-      }
-    }
-
-    // 3. Высота
-    if (changes.heightVal !== undefined || changes.heightUnit !== undefined) {
-      if (next.heightUnit === 'auto') {
-        el.style.height = 'auto';
-      } else if (next.heightUnit === '%') {
-        el.style.height = `${next.heightVal}%`;
-      } else if (next.heightUnit === 'dvh') {
-        el.style.height = `${next.heightVal}dvh`;
-      } else {
-        el.style.height = `${next.heightVal}px`;
-      }
-    }
-
-    // 4. Скругление
-    if (changes.radiusVal !== undefined) {
-      el.style.borderRadius = `${next.radiusVal}px`;
-    }
-
-    // Обновляем зеленую подсветку и геометрию
-    if (doc) {
-      updateSelectedOverlay(el, doc);
-    }
-    const newRect = el.getBoundingClientRect();
-    setSelectedElement(prev => (prev ? {
-      ...prev,
-      rect: {
-        top: Math.round(newRect.top),
-        left: Math.round(newRect.left),
-        width: Math.round(newRect.width),
-        height: Math.round(newRect.height),
-      }
-    } : null));
-  };
-
-  const handleApplyLiveStyle = (newClasses: string) => {
-    setLiveClasses(newClasses);
-    if (inspectedTargetRef.current) {
-      inspectedTargetRef.current.className = newClasses;
-      if (inspectedDocRef.current) {
-        updateSelectedOverlay(inspectedTargetRef.current, inspectedDocRef.current);
-      }
-    }
-    setSelectedElement(prev => (prev ? { ...prev, className: newClasses } : null));
-  };
-
-  /**
-   * Выбирает конкретный слой из стека в точке клика (верхний, под ним, ещё глубже)
-   */
-  const selectElementFromStack = (index: number, docOverride?: Document, elementsOverride?: HTMLElement[]) => {
-    const elements = elementsOverride || stackedElementsRef.current;
-    const doc = docOverride || inspectedDocRef.current;
-    if (!elements || index < 0 || index >= elements.length) return;
-    const target = elements[index];
-    if (!target) return;
-
-    setActiveLayerIndex(index);
-    inspectedTargetRef.current = target;
-    const className = typeof target.className === 'string' ? target.className : (target.className as any)?.baseVal || '';
-    setLiveClasses(className);
-
-    const rect = target.getBoundingClientRect();
-    const tag = target.tagName.toLowerCase();
-    const textSnippet = target.innerText?.trim()?.slice(0, 100) || '';
-
-    const path: string[] = [];
-    let curr: HTMLElement | null = target;
-    while (curr && curr.tagName !== 'BODY' && curr.tagName !== 'HTML' && path.length < 5) {
-      let part = curr.tagName.toLowerCase();
-      if (curr.id) {
-        part += `#${curr.id}`;
-      } else if (curr.className && typeof curr.className === 'string') {
-        const cls = curr.className.split(' ').filter(c => !c.startsWith('hover:') && !c.startsWith('focus:'))[0];
-        if (cls) part += `.${cls}`;
-      }
-      path.unshift(part);
-      curr = curr.parentElement;
-    }
-    const selector = path.join(' > ');
-    const { componentName, sourceFile, sourceLine } = getReactSourceInfo(target);
-
-    setSelectedElement({
-      tag,
-      id: target.id || undefined,
-      className,
-      textSnippet,
-      rect: {
-        top: Math.round(rect.top),
-        left: Math.round(rect.left),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      },
-      selector,
-      componentName,
-      sourceFile,
-      sourceLine,
-      layerIndex: index,
-      totalLayers: elements.length,
-      coveringTag: index > 0 && elements[0] ? elements[0].tagName.toLowerCase() : undefined,
-    });
-
-    try {
-      const win = doc?.defaultView || window;
-      const comp = win.getComputedStyle(target);
-      const currentOpacity = comp ? Math.round(parseFloat(comp.opacity || '1') * 100) : 100;
-      const currentRadius = comp ? parseInt(comp.borderRadius || '0', 10) || 0 : 0;
-      const isBgTransparent = !comp || comp.backgroundColor === 'transparent' || comp.backgroundColor === 'rgba(0, 0, 0, 0)';
-      const textAlignVal = comp ? comp.textAlign : '';
-      const currentAlign: 'left' | 'center' | 'right' | 'none' =
-        textAlignVal === 'center' ? 'center' :
-        textAlignVal === 'right' ? 'right' :
-        textAlignVal === 'left' ? 'left' : 'none';
-
-      setTunerState({
-        bgOpacity: isBgTransparent ? 0 : 100,
-        widthVal: Math.round(rect.width),
-        widthUnit: 'px',
-        heightVal: Math.round(rect.height),
-        heightUnit: 'px',
-        radiusVal: currentRadius,
-        align: currentAlign,
-      });
-    } catch {}
-
-    if (doc) {
-      updateSelectedOverlay(target, doc);
-    }
-  };
-
-  /**
-   * Выбирает элемент напрямую (например, клик по родителю или потомку в DOM)
-   */
-  const selectElementDirectly = (target: HTMLElement) => {
-    const doc = inspectedDocRef.current;
-    if (!target || !doc) return;
-
-    inspectedTargetRef.current = target;
-    const className = typeof target.className === 'string' ? target.className : (target.className as any)?.baseVal || '';
-    setLiveClasses(className);
-
-    const rect = target.getBoundingClientRect();
-    const tag = target.tagName.toLowerCase();
-    const textSnippet = target.innerText?.trim()?.slice(0, 100) || '';
-
-    const path: string[] = [];
-    let curr: HTMLElement | null = target;
-    while (curr && curr.tagName !== 'BODY' && curr.tagName !== 'HTML' && path.length < 5) {
-      let part = curr.tagName.toLowerCase();
-      if (curr.id) {
-        part += `#${curr.id}`;
-      } else if (curr.className && typeof curr.className === 'string') {
-        const cls = curr.className.split(' ').filter(c => !c.startsWith('hover:') && !c.startsWith('focus:'))[0];
-        if (cls) part += `.${cls}`;
-      }
-      path.unshift(part);
-      curr = curr.parentElement;
-    }
-    const selector = path.join(' > ');
-    const { componentName, sourceFile, sourceLine } = getReactSourceInfo(target);
-
-    const idx = stackedElementsRef.current.indexOf(target);
-    if (idx !== -1) {
-      setActiveLayerIndex(idx);
-    }
-
-    setSelectedElement({
-      tag,
-      id: target.id || undefined,
-      className,
-      textSnippet,
-      rect: {
-        top: Math.round(rect.top),
-        left: Math.round(rect.left),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      },
-      selector,
-      componentName,
-      sourceFile,
-      sourceLine,
-      layerIndex: idx !== -1 ? idx : undefined,
-      totalLayers: stackedElementsRef.current.length || undefined,
-      coveringTag: idx > 0 && stackedElementsRef.current[0] ? stackedElementsRef.current[0].tagName.toLowerCase() : undefined,
-    });
-
-    try {
-      const win = doc?.defaultView || window;
-      const comp = win.getComputedStyle(target);
-      const currentOpacity = comp ? Math.round(parseFloat(comp.opacity || '1') * 100) : 100;
-      const currentRadius = comp ? parseInt(comp.borderRadius || '0', 10) || 0 : 0;
-      const isBgTransparent = !comp || comp.backgroundColor === 'transparent' || comp.backgroundColor === 'rgba(0, 0, 0, 0)';
-      const textAlignVal = comp ? comp.textAlign : '';
-      const currentAlign: 'left' | 'center' | 'right' | 'none' =
-        textAlignVal === 'center' ? 'center' :
-        textAlignVal === 'right' ? 'right' :
-        textAlignVal === 'left' ? 'left' : 'none';
-
-      setTunerState({
-        bgOpacity: isBgTransparent ? 0 : 100,
-        widthVal: Math.round(rect.width),
-        widthUnit: 'px',
-        heightVal: Math.round(rect.height),
-        heightUnit: 'px',
-        radiusVal: currentRadius,
-        align: currentAlign,
-      });
-    } catch {}
-
-    updateSelectedOverlay(target, doc);
-  };
-
-  const handleSelectParent = () => {
-    const el = inspectedTargetRef.current;
-    if (!el || !el.parentElement || el.parentElement.tagName === 'BODY' || el.parentElement.tagName === 'HTML') return;
-    selectElementDirectly(el.parentElement);
-  };
-
-  const handleSelectChild = () => {
-    const el = inspectedTargetRef.current;
-    if (!el || !el.firstElementChild) return;
-    selectElementDirectly(el.firstElementChild as HTMLElement);
-  };
-
-  const handleToggleHideCurrentElement = () => {
-    const el = inspectedTargetRef.current;
-    if (!el) return;
-    const prevDisplay = el.style.display || '';
-    const prevPointerEvents = el.style.pointerEvents || '';
-    el.style.display = 'none';
-    hiddenElementsRef.current.push({ el, prevDisplay, prevPointerEvents });
-    setHiddenCount(hiddenElementsRef.current.length);
-
-    // Если есть слои под ним — автоматически выбираем следующий слой
-    if (layers.length > 1 && activeLayerIndex < layers.length - 1) {
-      selectElementFromStack(activeLayerIndex + 1);
-    } else if (el.parentElement && el.parentElement.tagName !== 'BODY') {
-      selectElementDirectly(el.parentElement);
-    }
-  };
-
-  const handleRestoreHiddenElements = () => {
-    hiddenElementsRef.current.forEach(item => {
-      try {
-        item.el.style.display = item.prevDisplay;
-        item.el.style.pointerEvents = item.prevPointerEvents;
-      } catch {}
-    });
-    hiddenElementsRef.current = [];
-    setHiddenCount(0);
-    if (inspectedTargetRef.current && inspectedDocRef.current) {
-      updateSelectedOverlay(inspectedTargetRef.current, inspectedDocRef.current);
-    }
-  };
-
-  const handleDeselect = () => {
-    setSelectedElement(null);
-    inspectedTargetRef.current = null;
-    clearSelectedOverlay(inspectedDocRef.current);
-    setLayers([]);
-    setActiveLayerIndex(0);
-  };
-
-  // Dynamic Device Slots (Multi-Screen Workspace inspired by Mobile View)
+  // Multi-Device Workspace State
   const [slots, setSlots] = useState<DeviceSlotState[]>([
     { id: 'slot-1', deviceKey: 'iphone16pro', rotated: false },
   ]);
+  const [showBezel, setShowBezel] = useState(true);
+  const [showSafeArea, setShowSafeArea] = useState(false);
+  const [showBoxModel, setShowBoxModel] = useState(true);
+  const [zoom, setZoom] = useState(0.88);
+  const [targetUrl, setTargetUrl] = useState('/demo');
+  const [inputUrl, setInputUrl] = useState('/demo');
 
-  // Modals & Panels
-  const [showQrModal, setShowQrModal] = useState(false);
+  // Inspector & Style Tuner State
+  const [isInspectMode, setIsInspectMode] = useState(false);
+  const [selectedElement, setSelectedElement] = useState<ElementInfo | null>(null);
+  const [initialClasses, setInitialClasses] = useState('');
+  const [liveClasses, setLiveClasses] = useState('');
+  const [initialTuner, setInitialTuner] = useState<StyleTunerState>(DEFAULT_TUNER_STATE);
+  const [tunerState, setTunerState] = useState<StyleTunerState>(DEFAULT_TUNER_STATE);
+  const [undoStack, setUndoStack] = useState<StyleTunerState[]>([]);
+  const [redoStack, setRedoStack] = useState<StyleTunerState[]>([]);
 
-  // Tunnel state
-  const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
-  const [tunnelQr, setTunnelQr] = useState<string | null>(null);
-  const [tunnelLoading, setTunnelLoading] = useState(false);
-  const localWifiUrl = 'http://192.168.1.93:3050';
-  const [wifiQr, setWifiQr] = useState<string | null>(null);
+  // Z-Index Layers under cursor
+  const [layers, setLayers] = useState<LayerSummary[]>([]);
+  const [activeLayerIndex, setActiveLayerIndex] = useState(0);
+  const [hiddenCount, setHiddenCount] = useState(0);
+  const [inspectedSlotName, setInspectedSlotName] = useState('iPhone 16 Pro');
 
-  // Haptic Visualizer
+  // Agent Directives & Prompt Queue State
+  const [selectedDirectiveId, setSelectedDirectiveId] = useState<string>('responsive-320');
+  const [noteText, setNoteText] = useState('');
+  const [copiedSingle, setCopiedSingle] = useState(false);
+  const [enqueuedFeedback, setEnqueuedFeedback] = useState(false);
+  const [agentQueue, setAgentQueue] = useState<AgentQueueItem[]>([
+    {
+      id: 'seed-task-1',
+      pinNumber: 1,
+      createdAt: '18:00:00',
+      slotDeviceName: 'iPhone 16 Pro',
+      priority: 'high',
+      directiveId: 'responsive-320',
+      note: 'Сделать фон карточки прозрачным и выровнять заголовок по центру на экранах 320px',
+      element: {
+        tag: 'div',
+        className: 'relative p-4 rounded-3xl bg-gradient-to-br from-[#3B1D7A] via-[#241445] to-[#131122]',
+        textSnippet: 'Инспектор Z-Index и Тюнер 2.0',
+        rect: { top: 148, left: 16, width: 361, height: 184 },
+        selector: 'main > div > div.relative',
+        componentName: 'HeroBannerCard',
+        sourceFile: 'components/demo/DemoApp.tsx',
+        sourceLine: 189,
+        layerIndex: 0,
+        totalLayers: 2,
+      },
+      diffs: [
+        {
+          property: 'Прозрачность фона',
+          before: '100%',
+          after: '0%',
+          tailwindSuggestion: 'bg-transparent',
+        },
+      ],
+    },
+  ]);
+
+  // Layout Audit & Telegram Env Simulation State
+  const [auditIssues, setAuditIssues] = useState<LayoutAuditIssue[]>([]);
+  const [tgEnv, setTgEnv] = useState<TgSimulatedEnv>({
+    colorScheme: 'dark',
+    safeAreaPad: true,
+    mainButtonVisible: false,
+    mainButtonText: 'Опубликовать в Telegram',
+    stressOverflowBanner: false,
+  });
   const [hapticTriggered, setHapticTriggered] = useState(false);
+  const [hapticLogs, setHapticLogs] = useState<HapticEventRecord[]>([]);
 
-  // Iframe Refs Map for multi-screen sync
+  // Modals & Bridge Info
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showTunnelModal, setShowTunnelModal] = useState(false);
+  const [lanInfo, setLanInfo] = useState({
+    localWifiUrl: 'http://192.168.1.93:3000',
+    publicAppUrl: 'https://viewer-antigravity.local',
+  });
+
+  // Refs for DOM inspection & Multi-Device Sync
   const iframesRef = useRef<Map<string, HTMLIFrameElement>>(new Map());
-  const zoomSliderRef = useRef<HTMLDivElement>(null);
+  const canvasContainerRef = useRef<HTMLDivElement>(null);
+  const inspectedTargetRef = useRef<HTMLElement | null>(null);
+  const inspectedDocRef = useRef<Document | null>(null);
+  const stackedElementsRef = useRef<HTMLElement[]>([]);
+  const hiddenElementsRef = useRef<
+    Array<{ el: HTMLElement; prevDisplay: string; prevPointerEvents: string }>
+  >([]);
 
-  const currentBg = CANVAS_BACKGROUNDS.find(b => b.key === bgKey) || CANVAS_BACKGROUNDS[0];
-  const isDark = currentBg.isDark;
-
-  // Sound generator for Web Haptics
-  const playHapticAudio = (type: string) => {
-    try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-
-      const freq = type === 'selection' ? 1200 : type === 'medium' ? 650 : 850;
-      osc.frequency.setValueAtTime(freq, ctx.currentTime);
-      gain.gain.setValueAtTime(0.08, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.025);
-
-      osc.start();
-      osc.stop(ctx.currentTime + 0.025);
-    } catch {
-      // AudioContext muted or not allowed
+  const handleIframeRef = useCallback((slotId: string, el: HTMLIFrameElement | null) => {
+    if (el) {
+      iframesRef.current.set(slotId, el);
+    } else {
+      iframesRef.current.delete(slotId);
     }
-  };
+  }, []);
 
-  // Listen to haptic events from iframe
+  // Fetch LAN & Bridge metadata on mount
+  useEffect(() => {
+    fetch('/api/antigravity-bridge')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.ok) {
+          setLanInfo({
+            localWifiUrl: data.localWifiUrl,
+            publicAppUrl: data.publicAppUrl,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Broadcast Telegram Environment simulation changes to all iframes
+  const updateTgEnv = useCallback((patch: Partial<TgSimulatedEnv>) => {
+    setTgEnv((prev) => {
+      const next = { ...prev, ...patch };
+      iframesRef.current.forEach((iframe) => {
+        try {
+          iframe.contentWindow?.postMessage({ type: 'tg:env-update', payload: next }, '*');
+        } catch {
+          // Ignore
+        }
+      });
+      return next;
+    });
+  }, []);
+
+  // Listen to Web Haptics from iframes using Singleton HapticAudioEngine
   useEffect(() => {
     const handleMessage = (e: MessageEvent) => {
       if (e.data && e.data.type === 'tg:haptic') {
-        const type = e.data.detail?.type || 'light';
+        const style = (e.data.detail?.type || 'light') as ImpactStyle;
+        const source = e.data.detail?.source || 'MiniApp';
         setHapticTriggered(true);
-        playHapticAudio(type);
-        setTimeout(() => setHapticTriggered(false), 260);
+        const profile = hapticAudioEngine.play(style);
+        const nowStr = new Date().toLocaleTimeString('ru-RU');
+
+        setHapticLogs((prev) => [
+          {
+            id: `hap-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            style,
+            source,
+            timestamp: nowStr,
+            frequencyHz: profile.frequencyHz,
+            durationMs: profile.durationMs,
+          },
+          ...prev.slice(0, 29),
+        ]);
+
+        setTimeout(() => setHapticTriggered(false), 240);
       }
     };
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
-  // Multi-Device Scroll & Click Synchronizer across all active slots
+  // Multi-Device Scroll & Click Synchronizer with rAF lock
   useEffect(() => {
     if (slots.length < 2) return;
-
     let isSyncing = false;
-
     const iframes = Array.from(iframesRef.current.values()).filter(Boolean);
-
     const cleanupFns: Array<() => void> = [];
 
     iframes.forEach((sourceIframe, srcIdx) => {
-      const doc = sourceIframe.contentDocument || sourceIframe.contentWindow?.document;
+      let doc: Document | null = null;
+      try {
+        doc = sourceIframe.contentDocument || sourceIframe.contentWindow?.document || null;
+      } catch {
+        return;
+      }
       if (!doc) return;
 
-      // Synchronize internal scroll
       const handleScroll = (e: Event) => {
         if (isSyncing) return;
         isSyncing = true;
-        try {
-          const src = e.target as HTMLElement;
-          if (src && src.scrollHeight > src.clientHeight) {
-            const scrollPct = src.scrollTop / (src.scrollHeight - src.clientHeight || 1);
-
-            iframes.forEach((otherIframe, otherIdx) => {
-              if (srcIdx === otherIdx) return;
-              const otherDoc = otherIframe.contentDocument || otherIframe.contentWindow?.document;
-              if (otherDoc) {
-                const target = otherDoc.querySelector('main') || otherDoc.querySelector('.overflow-y-auto') || otherDoc.documentElement;
-                if (target) {
-                  target.scrollTop = scrollPct * (target.scrollHeight - target.clientHeight);
+        window.requestAnimationFrame(() => {
+          try {
+            const src = (e.target === doc ? doc?.scrollingElement : (e.target as HTMLElement)) as HTMLElement | null;
+            if (src && src.scrollHeight > src.clientHeight) {
+              const scrollPct = src.scrollTop / Math.max(1, src.scrollHeight - src.clientHeight);
+              iframes.forEach((otherIframe, otherIdx) => {
+                if (srcIdx === otherIdx) return;
+                const otherDoc = otherIframe.contentDocument || otherIframe.contentWindow?.document;
+                const otherScrollEl = otherDoc?.scrollingElement as HTMLElement | null;
+                if (otherScrollEl && otherScrollEl.scrollHeight > otherScrollEl.clientHeight) {
+                  otherScrollEl.scrollTop = scrollPct * (otherScrollEl.scrollHeight - otherScrollEl.clientHeight);
                 }
-              }
-            });
+              });
+            }
+          } catch {
+            // Ignore
+          } finally {
+            isSyncing = false;
           }
-        } catch {}
-        setTimeout(() => { isSyncing = false; }, 35);
+        });
       };
 
-      // Synchronize clicks on buttons / tabs
-      const handleClick = (e: MouseEvent) => {
-        if (isSyncing) return;
-        try {
-          const el = e.target as HTMLElement;
-          const clickable = el?.closest('button, a, [role="button"]') as HTMLElement;
-          if (!clickable) return;
-
-          const text = clickable.innerText?.trim();
-          if (text) {
-            iframes.forEach((otherIframe, otherIdx) => {
-              if (srcIdx === otherIdx) return;
-              const otherDoc = otherIframe.contentDocument || otherIframe.contentWindow?.document;
-              if (otherDoc) {
-                const candidates = Array.from(otherDoc.querySelectorAll('button, a, [role="button"]')) as HTMLElement[];
-                const match = candidates.find(c => c.innerText?.trim() === text);
-                if (match && match !== clickable) {
-                  isSyncing = true;
-                  match.click();
-                  setTimeout(() => { isSyncing = false; }, 60);
-                }
-              }
-            });
-          }
-        } catch {}
-      };
-
-      doc.addEventListener('scroll', handleScroll, true);
-      doc.addEventListener('click', handleClick, true);
-
-      cleanupFns.push(() => {
-        doc.removeEventListener('scroll', handleScroll, true);
-        doc.removeEventListener('click', handleClick, true);
-      });
+      doc.addEventListener('scroll', handleScroll, { capture: true, passive: true });
+      cleanupFns.push(() => doc?.removeEventListener('scroll', handleScroll, true));
     });
 
-    return () => {
-      cleanupFns.forEach(fn => fn());
-    };
+    return () => cleanupFns.forEach((fn) => fn());
   }, [slots]);
 
-  // DevTools Click-to-Inspect implementation (attaches to all active slots)
+  // Visual layer builder state & multi-screen sync
+  const [designLayers, setDesignLayers] = useState<DesignLayerNode[]>([]);
+  const [activeBuilderLayerId, setActiveBuilderLayerId] = useState<string | null>(null);
+  const [liveMultiScreenSync, setLiveMultiScreenSync] = useState<boolean>(true);
+
+  const getPrimaryIframeDoc = useCallback((): Document | null => {
+    const firstIframe = Array.from(iframesRef.current.values())[0];
+    if (!firstIframe) return null;
+    try {
+      return firstIframe.contentDocument || firstIframe.contentWindow?.document || null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const getTargetIframeDocs = useCallback((): Document[] => {
+    const allIframes = Array.from(iframesRef.current.values());
+    const targetIframes = liveMultiScreenSync ? allIframes : allIframes.slice(0, 1);
+    const docs: Document[] = [];
+    targetIframes.forEach((iframe) => {
+      try {
+        const d = iframe.contentDocument || iframe.contentWindow?.document;
+        if (d && d.body) docs.push(d);
+      } catch {
+        // Ignore cross-origin
+      }
+    });
+    return docs;
+  }, [liveMultiScreenSync]);
+
+  const refreshDesignLayers = useCallback(
+    (preferredActiveId?: string | null) => {
+      const doc = getPrimaryIframeDoc();
+      if (!doc || !doc.body) return;
+      const extracted = extractIframeDesignLayers(doc);
+      if (extracted.length === 0) return;
+
+      setDesignLayers((prev) => {
+        if (
+          prev.length === extracted.length &&
+          prev.every((p, idx) => {
+            const e = extracted[idx];
+            return (
+              p.id === e.id &&
+              p.transform.dx === e.transform.dx &&
+              p.transform.dy === e.transform.dy &&
+              p.transform.width === e.transform.width &&
+              p.transform.height === e.transform.height &&
+              p.textValue === e.textValue &&
+              p.visible === e.visible &&
+              p.locked === e.locked
+            );
+          })
+        ) {
+          return prev;
+        }
+        return extracted;
+      });
+
+      setActiveBuilderLayerId((prev) => {
+        if (preferredActiveId !== undefined) {
+          return preferredActiveId;
+        }
+        if (prev && extracted.some((l) => l.id === prev)) {
+          return prev;
+        }
+        return prev ?? extracted[0]?.id ?? null;
+      });
+    },
+    [getPrimaryIframeDoc]
+  );
+
+  // Automatically extract & refresh design layers when iframe is ready or reloaded
   useEffect(() => {
-    const iframes = Array.from(iframesRef.current.entries()).filter(([_, el]) => Boolean(el));
-    if (iframes.length === 0) return;
+    let timer: NodeJS.Timeout | null = null;
+    let attempts = 0;
+    const tryExtract = () => {
+      const doc = getPrimaryIframeDoc();
+      if (doc && doc.body) {
+        const extracted = extractIframeDesignLayers(doc);
+        if (extracted.length > 0) {
+          setDesignLayers(extracted);
+          return;
+        }
+      }
+      if (attempts < 20) {
+        attempts++;
+        timer = setTimeout(tryExtract, 250);
+      }
+    };
+    tryExtract();
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [getPrimaryIframeDoc, targetUrl, slots]);
+
+  // Select element helper (used by click inspector, layer switcher, and quick-select buttons)
+  const selectDomElement = useCallback(
+    (target: HTMLElement, doc: Document, customStack?: HTMLElement[], layerIdx = 0) => {
+      inspectedTargetRef.current = target;
+      inspectedDocRef.current = doc;
+
+      // Sync with visual layer builder
+      const layerId = ensureLayerAttributes(target, layerIdx);
+      setActiveBuilderLayerId(layerId);
+      refreshDesignLayers(layerId);
+
+      const cls =
+        typeof target.className === 'string'
+          ? target.className
+          : (target.className as unknown as { baseVal?: string })?.baseVal || '';
+      setInitialClasses(cls);
+      setLiveClasses(cls);
+
+      const rect = target.getBoundingClientRect();
+      const win = doc.defaultView || window;
+      const boxModel = getBoxModelMetrics(target, win);
+      const selector = buildDomSelectorPath(target);
+      const { componentName, sourceFile, sourceLine } = getReactSourceInfo(target);
+      const stack = customStack || stackedElementsRef.current;
+
+      let computedTuner: StyleTunerState = {
+        ...DEFAULT_TUNER_STATE,
+        widthVal: Math.round(rect.width),
+        widthUnit: 'px',
+        heightVal: Math.round(rect.height),
+        heightUnit: 'px',
+        paddingX: boxModel.paddingLeft,
+        paddingY: boxModel.paddingTop,
+      };
+
+      try {
+        const comp = win.getComputedStyle(target);
+        const radius = parseInt(comp.borderRadius || '0', 10) || 0;
+        const hasBgImage = Boolean(comp && comp.backgroundImage && comp.backgroundImage !== 'none');
+        const isTransparent =
+          !hasBgImage &&
+          (!comp || comp.backgroundColor === 'transparent' || comp.backgroundColor === 'rgba(0, 0, 0, 0)');
+        const alignVal = comp?.textAlign || '';
+        const currentAlign: StyleTunerState['align'] =
+          alignVal === 'center'
+            ? 'center'
+            : alignVal === 'right'
+            ? 'right'
+            : alignVal === 'left'
+            ? 'left'
+            : 'none';
+
+        computedTuner = {
+          ...computedTuner,
+          bgOpacity: isTransparent ? 0 : 100,
+          radiusVal: radius,
+          align: currentAlign,
+        };
+      } catch {
+        // Fallback
+      }
+
+      setInitialTuner(computedTuner);
+      setTunerState(computedTuner);
+      setUndoStack([]);
+      setRedoStack([]);
+      setActiveLayerIndex(layerIdx);
+
+      setSelectedElement({
+        tag: target.tagName.toLowerCase(),
+        id: target.id || undefined,
+        className: cls,
+        textSnippet: (target.innerText || '').trim().slice(0, 90),
+        rect: {
+          top: Math.round(rect.top),
+          left: Math.round(rect.left),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        },
+        boxModel,
+        selector,
+        componentName,
+        sourceFile,
+        sourceLine,
+        layerIndex: layerIdx,
+        totalLayers: stack.length || 1,
+        coveringTag:
+          layerIdx > 0 && stack[0] ? stack[0].tagName.toLowerCase() : undefined,
+      });
+
+      if (dockTab === 'layers') {
+        clearSelectedOverlay(doc);
+      } else {
+        updateSelectedOverlay(target, doc, showBoxModel);
+      }
+    },
+    [dockTab, showBoxModel, refreshDesignLayers]
+  );
+
+  // Quick-select a component inside the first active iframe (great for instant testing & accessibility)
+  const handleQuickSelectComponent = (dataComponentName: string) => {
+    const firstIframe = Array.from(iframesRef.current.values())[0];
+    const doc = firstIframe?.contentDocument || firstIframe?.contentWindow?.document;
+    if (!doc) return;
+    const el = doc.querySelector(`[data-component="${dataComponentName}"]`) as HTMLElement | null;
+    if (!el) return;
+
+    const r = el.getBoundingClientRect();
+    const rawStack = (doc.elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2) as HTMLElement[]).filter(
+      (n) => n && n.tagName !== 'HTML' && n.tagName !== 'BODY' && !n.id?.startsWith('__antigravity')
+    );
+    const validStack = rawStack.includes(el) ? rawStack : [el, ...rawStack];
+    stackedElementsRef.current = validStack;
+
+    const summaries: LayerSummary[] = validStack.map((node, i) => {
+      const info = getReactSourceInfo(node);
+      const nr = node.getBoundingClientRect();
+      return {
+        tag: node.tagName.toLowerCase(),
+        className: typeof node.className === 'string' ? node.className : '',
+        textSnippet: (node.innerText || '').trim().slice(0, 60),
+        componentName: info.componentName,
+        sourceFile: info.sourceFile,
+        sourceLine: info.sourceLine,
+        width: Math.round(nr.width),
+        height: Math.round(nr.height),
+        roleHint: i === 0 ? 'Верхний' : i === validStack.length - 1 ? 'Дно' : 'Под ним',
+      };
+    });
+    setLayers(summaries);
+    const idx = Math.max(0, validStack.indexOf(el));
+    selectDomElement(el, doc, validStack, idx);
+  };
+
+  // rAF-Throttled Iframe Hover & Click DOM Inspector
+  useEffect(() => {
+    const entries = Array.from(iframesRef.current.entries()).filter(([, el]) => Boolean(el));
+    if (entries.length === 0) return;
 
     const cleanupFns: Array<() => void> = [];
 
-    iframes.forEach(([slotId, iframe]) => {
+    entries.forEach(([slotId, iframe]) => {
       let doc: Document | null = null;
       try {
         doc = iframe.contentDocument || iframe.contentWindow?.document || null;
@@ -727,7 +604,6 @@ export default function LivePreviewPage() {
       }
 
       doc.body.style.cursor = 'crosshair';
-
       let overlay = doc.getElementById('__antigravity_hover_overlay__');
       if (!overlay) {
         overlay = doc.createElement('div');
@@ -736,9 +612,8 @@ export default function LivePreviewPage() {
         overlay.style.pointerEvents = 'none';
         overlay.style.zIndex = '999999';
         overlay.style.border = '2px solid #B833FF';
-        overlay.style.background = 'rgba(184, 51, 255, 0.22)';
+        overlay.style.background = 'rgba(184, 51, 255, 0.20)';
         overlay.style.borderRadius = '6px';
-        overlay.style.transition = 'all 45ms cubic-bezier(0.2, 0.8, 0.2, 1)';
         overlay.style.display = 'none';
 
         const tooltip = doc.createElement('div');
@@ -756,47 +631,40 @@ export default function LivePreviewPage() {
         tooltip.style.borderRadius = '8px';
         tooltip.style.border = '1px solid rgba(184, 51, 255, 0.6)';
         tooltip.style.whiteSpace = 'nowrap';
-        tooltip.style.boxShadow = '0 6px 18px rgba(0,0,0,0.7)';
-        tooltip.style.pointerEvents = 'none';
         overlay.appendChild(tooltip);
-
         doc.body.appendChild(overlay);
       }
 
       const tooltip = doc.getElementById('__antigravity_hover_tooltip__');
+      let rafId: number | null = null;
 
       const handleMouseMove = (e: MouseEvent) => {
-        if (!isInspectMode || !doc) return;
+        if (!isInspectMode || !doc || rafId !== null) return;
         const target = e.target as HTMLElement;
-        if (!target || target === overlay || target.id?.startsWith('__antigravity')) return;
+        const clientX = e.clientX;
+        const clientY = e.clientY;
 
-        const rect = target.getBoundingClientRect();
-        if (overlay) {
-          overlay.style.display = 'block';
-          overlay.style.top = `${rect.top}px`;
-          overlay.style.left = `${rect.left}px`;
-          overlay.style.width = `${rect.width}px`;
-          overlay.style.height = `${rect.height}px`;
-        }
-
-        if (tooltip) {
-          const tag = target.tagName.toLowerCase();
-          let classSnippet = '';
-          const cls = typeof target.className === 'string' ? target.className : (target.className as any)?.baseVal || '';
-          if (cls) {
-            const parts = cls.split(' ').filter(Boolean).slice(0, 2);
-            if (parts.length > 0) classSnippet = '.' + parts.join('.');
+        rafId = window.requestAnimationFrame(() => {
+          rafId = null;
+          if (!target || target === overlay || target.id?.startsWith('__antigravity') || !doc) return;
+          const rect = target.getBoundingClientRect();
+          if (overlay) {
+            overlay.style.display = 'block';
+            overlay.style.top = `${rect.top}px`;
+            overlay.style.left = `${rect.left}px`;
+            overlay.style.width = `${rect.width}px`;
+            overlay.style.height = `${rect.height}px`;
           }
-          const dims = `${Math.round(rect.width)} × ${Math.round(rect.height)}`;
-
-          const stackedAtPoint = (doc.elementsFromPoint(e.clientX, e.clientY) as HTMLElement[])
-            .filter(el => el && el.tagName !== 'HTML' && el.tagName !== 'BODY' && !el.id?.startsWith('__antigravity'));
-          const stackBadge = stackedAtPoint.length > 1
-            ? ` <span style="background:#B833FF;color:white;padding:1px 5px;border-radius:4px;font-size:9.5px;margin-left:6px;font-weight:900;">🥞 ${stackedAtPoint.length} слоя</span>`
-            : '';
-
-          tooltip.innerHTML = `<span style="color:#D8B4FE;">${tag}${classSnippet}</span> <span style="color:#A1A1AA;font-weight:normal;margin-left:6px;">${dims}</span>${stackBadge}`;
-        }
+          if (tooltip) {
+            const tag = target.tagName.toLowerCase();
+            const { componentName } = getReactSourceInfo(target);
+            const dims = `${Math.round(rect.width)}×${Math.round(rect.height)}`;
+            const stacked = (doc.elementsFromPoint(clientX, clientY) as HTMLElement[]).filter(
+              (el) => el && el.tagName !== 'HTML' && el.tagName !== 'BODY' && !el.id?.startsWith('__antigravity')
+            );
+            tooltip.textContent = `<${tag}>${componentName ? ` [${componentName}]` : ''} ${dims}px · Слоёв: ${stacked.length}`;
+          }
+        });
       };
 
       const handleClick = (e: MouseEvent) => {
@@ -807,63 +675,45 @@ export default function LivePreviewPage() {
         const target = e.target as HTMLElement;
         if (!target || target === overlay || target.id?.startsWith('__antigravity')) return;
 
-        // Получаем все элементы под курсором в порядке Z-Index (сверху вниз)
         const rawElements = (doc.elementsFromPoint(e.clientX, e.clientY) as HTMLElement[]) || [];
-        const validElements = rawElements.filter(el => {
-          if (!el) return false;
-          const tn = el.tagName;
-          if (tn === 'HTML' || tn === 'BODY') return false;
-          if (el.id?.startsWith('__antigravity')) return false;
-          return true;
-        });
-
-        if (!validElements.includes(target) && target.tagName !== 'HTML' && target.tagName !== 'BODY') {
-          validElements.unshift(target);
-        }
+        const validElements = rawElements.filter(
+          (el) => el && el.tagName !== 'HTML' && el.tagName !== 'BODY' && !el.id?.startsWith('__antigravity')
+        );
+        if (!validElements.includes(target)) validElements.unshift(target);
 
         stackedElementsRef.current = validElements;
-        inspectedDocRef.current = doc;
-
-        const slot = slots.find(s => s.id === slotId) || slots[0];
+        const slot = slots.find((s) => s.id === slotId) || slots[0];
         const spec = PREVIEW_DEVICES[slot?.deviceKey] || PREVIEW_DEVICES.iphone16pro;
         setInspectedSlotName(spec.name);
 
-        // Строим информацию по всем слоям под курсором
         const summaries: LayerSummary[] = validElements.map((el, i) => {
-          const { componentName, sourceFile, sourceLine } = getReactSourceInfo(el);
+          const info = getReactSourceInfo(el);
           const r = el.getBoundingClientRect();
-          const cls = typeof el.className === 'string' ? el.className : (el.className as any)?.baseVal || '';
-          const text = el.innerText?.trim()?.slice(0, 70) || '';
-          const tag = el.tagName.toLowerCase();
           return {
-            tag,
-            className: cls,
-            textSnippet: text,
-            componentName,
-            sourceFile,
-            sourceLine,
+            tag: el.tagName.toLowerCase(),
+            className: typeof el.className === 'string' ? el.className : '',
+            textSnippet: (el.innerText || '').trim().slice(0, 60),
+            componentName: info.componentName,
+            sourceFile: info.sourceFile,
+            sourceLine: info.sourceLine,
             width: Math.round(r.width),
             height: Math.round(r.height),
             roleHint: i === 0 ? 'Верхний' : i === validElements.length - 1 ? 'Дно' : 'Под ним',
           };
         });
-
         setLayers(summaries);
 
-        // Если при клике был зажат Alt — сразу выбираем слой под ним (глубже)
-        const targetIdx = (e.altKey && validElements.length > 1) ? 1 : 0;
-        selectElementFromStack(targetIdx, doc, validElements);
+        const targetIdx = e.altKey && validElements.length > 1 ? 1 : 0;
+        selectDomElement(validElements[targetIdx], doc, validElements, targetIdx);
         setIsInspectMode(false);
-
-        if (overlay) {
-          overlay.style.display = 'none';
-        }
+        if (overlay) overlay.style.display = 'none';
       };
 
       doc.addEventListener('mousemove', handleMouseMove, true);
       doc.addEventListener('click', handleClick, true);
 
       cleanupFns.push(() => {
+        if (rafId !== null) window.cancelAnimationFrame(rafId);
         if (doc) {
           doc.removeEventListener('mousemove', handleMouseMove, true);
           doc.removeEventListener('click', handleClick, true);
@@ -874,12 +724,168 @@ export default function LivePreviewPage() {
       });
     });
 
-    return () => {
-      cleanupFns.forEach(fn => fn());
-    };
-  }, [isInspectMode, slots]);
+    return () => cleanupFns.forEach((fn) => fn());
+  }, [isInspectMode, slots, selectDomElement]);
 
-  // Hotkey listener (Alt+I, 'i', Esc)
+  // Apply Visual Style Tuner changes with Undo/Redo history
+  const applyTunerStyle = (changes: Partial<StyleTunerState>, recordUndo = true) => {
+    if (recordUndo) {
+      setUndoStack((prev) => [...prev.slice(-19), tunerState]);
+      setRedoStack([]);
+    }
+    const next = { ...tunerState, ...changes };
+    setTunerState(next);
+
+    const el = inspectedTargetRef.current;
+    const doc = inspectedDocRef.current;
+    if (!el) return;
+
+    el.style.opacity = '1';
+
+    if (changes.bgOpacity !== undefined) {
+      if (next.bgOpacity === 0) {
+        el.style.background = 'transparent';
+        el.style.backgroundColor = 'transparent';
+        el.style.backgroundImage = 'none';
+      } else {
+        const alpha = (next.bgOpacity / 100).toFixed(2);
+        el.style.backgroundColor = isDark ? `rgba(28, 20, 48, ${alpha})` : `rgba(255, 255, 255, ${alpha})`;
+        el.style.backgroundImage = 'none';
+      }
+    }
+
+    if (changes.align !== undefined) {
+      if (next.align === 'left') {
+        el.style.textAlign = 'left';
+      } else if (next.align === 'center') {
+        el.style.textAlign = 'center';
+      } else if (next.align === 'right') {
+        el.style.textAlign = 'right';
+      } else {
+        el.style.textAlign = '';
+      }
+    }
+
+    if (changes.widthVal !== undefined || changes.widthUnit !== undefined) {
+      el.style.width = next.widthUnit === 'auto' ? '' : `${next.widthVal}${next.widthUnit}`;
+    }
+
+    if (changes.heightVal !== undefined || changes.heightUnit !== undefined) {
+      el.style.height = next.heightUnit === 'auto' ? '' : `${next.heightVal}${next.heightUnit}`;
+    }
+
+    if (changes.radiusVal !== undefined) {
+      el.style.borderRadius = `${next.radiusVal}px`;
+    }
+
+    if (doc) {
+      requestAnimationFrame(() => {
+        const r = el.getBoundingClientRect();
+        setSelectedElement((prev) =>
+          prev
+            ? {
+                ...prev,
+                rect: {
+                  top: Math.round(r.top),
+                  left: Math.round(r.left),
+                  width: Math.round(r.width),
+                  height: Math.round(r.height),
+                },
+              }
+            : null
+        );
+        if (dockTab !== 'layers') {
+          updateSelectedOverlay(el, doc, showBoxModel);
+        }
+      });
+    }
+  };
+
+  const handleUndoTuner = () => {
+    if (undoStack.length === 0) return;
+    const previous = undoStack[undoStack.length - 1];
+    setUndoStack((s) => s.slice(0, -1));
+    setRedoStack((r) => [tunerState, ...r]);
+    applyTunerStyle(previous, false);
+  };
+
+  const handleRedoTuner = () => {
+    if (redoStack.length === 0) return;
+    const next = redoStack[0];
+    setRedoStack((r) => r.slice(1));
+    setUndoStack((s) => [...s, tunerState]);
+    applyTunerStyle(next, false);
+  };
+
+  // Compute live diffs between initial snapshot and current tuner state
+  const currentDiffs = React.useMemo(
+    () =>
+      selectedElement
+        ? computeStyleDiff(initialTuner, tunerState, initialClasses, liveClasses)
+        : [],
+    [selectedElement, initialTuner, tunerState, initialClasses, liveClasses]
+  );
+
+  // Enqueue current inspected element into Agent Prompt Queue
+  const handleEnqueueCurrentElement = useCallback(() => {
+    if (!selectedElement) return;
+    const nextPin = agentQueue.length > 0 ? Math.max(...agentQueue.map((i) => i.pinNumber)) + 1 : 1;
+    const newItem: AgentQueueItem = {
+      id: `task-${Date.now()}`,
+      pinNumber: nextPin,
+      createdAt: new Date().toLocaleTimeString('ru-RU'),
+      slotDeviceName: inspectedSlotName,
+      element: selectedElement,
+      diffs: currentDiffs,
+      directiveId: selectedDirectiveId || undefined,
+      note: noteText.trim() || 'Примени подобранные настройки стилей в исходном компоненте.',
+      priority: 'normal',
+    };
+    setAgentQueue((prev) => [...prev, newItem]);
+    setEnqueuedFeedback(true);
+    setTimeout(() => setEnqueuedFeedback(false), 2000);
+  }, [selectedElement, agentQueue, inspectedSlotName, currentDiffs, selectedDirectiveId, noteText]);
+
+  // Run automated layout & safe area audit on first active iframe
+  const handleRunLayoutAudit = useCallback(() => {
+    const firstSlot = slots[0];
+    const firstIframe = firstSlot ? iframesRef.current.get(firstSlot.id) : null;
+    const doc = firstIframe?.contentDocument || firstIframe?.contentWindow?.document;
+    if (!doc || !firstSlot) return;
+
+    const spec = PREVIEW_DEVICES[firstSlot.deviceKey] || PREVIEW_DEVICES.iphone16pro;
+    const detected = scanIframeForAuditIssues(doc, spec, firstSlot.rotated);
+    setAuditIssues(detected);
+  }, [slots]);
+
+  // Fit-to-viewport auto zoom
+  const handleFitZoom = useCallback(() => {
+    const container = canvasContainerRef.current;
+    const cw = container?.clientWidth || 920;
+    const ch = container?.clientHeight || 780;
+    const mapped = slots.map((s) => {
+      const spec = PREVIEW_DEVICES[s.deviceKey] || PREVIEW_DEVICES.iphone16pro;
+      return { w: spec.w, h: spec.h, rotated: s.rotated, showBezel };
+    });
+    setZoom(calculateFitZoom(mapped, cw, ch));
+  }, [slots, showBezel]);
+
+  // Apply multi-device Workspace Preset
+  const handleApplyPreset = useCallback((presetId: string) => {
+    const preset = WORKSPACE_PRESETS.find((p) => p.id === presetId);
+    if (!preset) return;
+    setSlots(
+      preset.slots.map((s, idx) => ({
+        id: `slot-${idx + 1}-${Date.now()}`,
+        deviceKey: s.deviceKey,
+        rotated: s.rotated,
+      }))
+    );
+    setZoom(preset.recommendedZoom);
+    setDockTab('layers');
+  }, []);
+
+  // Global keyboard shortcuts listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const activeEl = document.activeElement;
@@ -889,1041 +895,1537 @@ export default function LivePreviewPage() {
         (activeEl as HTMLElement)?.isContentEditable;
 
       if (e.key === 'Escape') {
-        if (isInspectMode) setIsInspectMode(false);
-        if (selectedElement) handleDeselect();
-        setShowQrModal(false);
+        setIsInspectMode(false);
+        setShowCommandPalette(false);
+        setShowTunnelModal(false);
         return;
       }
 
-      const isAltI = e.altKey && (e.key === 'i' || e.key === 'I' || e.key === 'ш' || e.key === 'Ш');
-      const isBareI = !isInput && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'i' || e.key === 'I' || e.key === 'ш' || e.key === 'Ш');
-
-      if (isAltI || isBareI) {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.key === 'л')) {
         e.preventDefault();
-        setIsInspectMode(prev => !prev);
+        setShowCommandPalette((prev) => !prev);
+        return;
+      }
+
+      if (isInput) return;
+
+      if (e.altKey && (e.key === 'i' || e.key === 'I' || e.key === 'ш')) {
+        e.preventDefault();
+        setIsInspectMode((prev) => !prev);
+      } else if (e.altKey && (e.key === 'q' || e.key === 'Q' || e.key === 'й')) {
+        e.preventDefault();
+        handleEnqueueCurrentElement();
+      } else if (e.altKey && (e.key === 'b' || e.key === 'B' || e.key === 'и')) {
+        e.preventDefault();
+        setShowBoxModel((prev) => !prev);
+        setShowSafeArea((prev) => !prev);
+      } else if (e.altKey && e.key === '0') {
+        e.preventDefault();
+        handleFitZoom();
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isInspectMode, selectedElement]);
+  }, [handleEnqueueCurrentElement, handleFitZoom]);
 
-  // Open Tunnel & QR codes
-  const handleOpenTunnel = async () => {
-    setShowQrModal(true);
-    if (!wifiQr) {
-      QRCode.toDataURL(localWifiUrl, { margin: 2, width: 220 }).then(setWifiQr);
+  const workspaceMeta = {
+    url: targetUrl,
+    theme: currentTheme.name,
+    activeDevices: slots.map((s) => (PREVIEW_DEVICES[s.deviceKey] || PREVIEW_DEVICES.iphone16pro).name),
+  };
+
+  const handleCopySingleElementPrompt = () => {
+    if (!selectedElement) return;
+    const singleItem: AgentQueueItem = {
+      id: 'single',
+      pinNumber: 1,
+      createdAt: new Date().toLocaleTimeString('ru-RU'),
+      slotDeviceName: inspectedSlotName,
+      element: selectedElement,
+      diffs: currentDiffs,
+      directiveId: selectedDirectiveId || undefined,
+      note: noteText,
+      priority: 'high',
+    };
+    const prompt = buildConsolidatedAgentPrompt([singleItem], workspaceMeta);
+    navigator.clipboard.writeText(prompt);
+    setCopiedSingle(true);
+    setTimeout(() => setCopiedSingle(false), 2000);
+  };
+
+  const updateHiddenLayersCount = useCallback(() => {
+    const doc = getPrimaryIframeDoc();
+    if (!doc) {
+      setHiddenCount(0);
+      return;
     }
+    setHiddenCount(countDomHiddenLayers(doc));
+  }, [getPrimaryIframeDoc]);
 
-    if (!tunnelUrl && !tunnelLoading) {
-      setTunnelLoading(true);
-      try {
-        const res = await fetch('/api/tunnel', { method: 'POST' });
-        const data = await res.json();
-        if (data.url) {
-          setTunnelUrl(data.url);
-          QRCode.toDataURL(data.url, { margin: 2, width: 220 }).then(setTunnelQr);
-        }
-      } catch (e) {
-        console.error('Failed to start tunnel:', e);
-      } finally {
-        setTunnelLoading(false);
-      }
+  const handleToggleHideLayer = () => {
+    const doc = getPrimaryIframeDoc();
+    if (!doc) return;
+
+    let layerId = activeBuilderLayerId;
+    if (!layerId && inspectedTargetRef.current) {
+      layerId = inspectedTargetRef.current.getAttribute('data-ag-layer-id');
     }
-  };
-
-  // Slot Management
-  const handleAddSlot = () => {
-    if (slots.length >= 3) return;
-    const presets = ['iphonese', 'pixel8', 's24ultra', 'ipadmini'];
-    const nextPreset = presets[slots.length % presets.length];
-    setSlots(prev => [
-      ...prev,
-      { id: `slot-${Date.now().toString(36)}`, deviceKey: nextPreset, rotated: false },
-    ]);
-  };
-
-  const handleRotateSlot = (id: string) => {
-    setSlots(prev =>
-      prev.map(s => (s.id === id ? { ...s, rotated: !s.rotated } : s))
-    );
-  };
-
-  const handleChangeSlotDevice = (id: string, newKey: string) => {
-    setSlots(prev =>
-      prev.map(s => (s.id === id ? { ...s, deviceKey: newKey } : s))
-    );
-  };
-
-  const handleRemoveSlot = (id: string) => {
-    if (slots.length <= 1) return;
-    setSlots(prev => prev.filter(s => s.id !== id));
-    iframesRef.current.delete(id);
-  };
-
-  const handleScreenshot = (slotId: string) => {
-    const iframe = iframesRef.current.get(slotId);
-    if (iframe) {
-      alert('Скриншот экрана зафиксирован!');
+    if (!layerId && selectedElement) {
+      layerId = selectedElement.id || null;
     }
+    if (!layerId) return;
+
+    const docs = getTargetIframeDocs();
+    docs.forEach((d) => toggleDomLayerVisibility(d, layerId!));
+    updateHiddenLayersCount();
+    refreshDesignLayers(layerId);
   };
 
-  const handleCopyPrompt = () => {
-    const primaryDevice = PREVIEW_DEVICES[slots[0]?.deviceKey] || PREVIEW_DEVICES.iphone16pro;
-    const deviceName = inspectedSlotName || primaryDevice.name;
-    let prompt = `Посмотри на экран в симуляторе (${deviceName}).\n`;
-
-    if (selectedElement) {
-      prompt += `\n🎯 ЭЛЕМЕНТ:\n`;
-      if (selectedElement.sourceFile) {
-        prompt += `• Файл: ${selectedElement.sourceFile}${selectedElement.sourceLine ? `:${selectedElement.sourceLine}` : ''}\n`;
-      }
-      if (selectedElement.componentName) {
-        prompt += `• Компонент: <${selectedElement.componentName}>\n`;
-      }
-      if (selectedElement.layerIndex !== undefined && selectedElement.totalLayers && selectedElement.totalLayers > 1) {
-        prompt += `• Слой: ${selectedElement.layerIndex + 1} из ${selectedElement.totalLayers}${
-          selectedElement.layerIndex > 0 && selectedElement.coveringTag
-            ? ` (под перекрывающим слоем <${selectedElement.coveringTag}>)`
-            : ' (верхний слой)'
-        }\n`;
-      }
-      prompt += `• Тег: <${selectedElement.tag}>\n`;
-      if (selectedElement.className) {
-        prompt += `• Классы: "${selectedElement.className}"\n`;
-      }
-      if (selectedElement.textSnippet) {
-        prompt += `• Текст: "${selectedElement.textSnippet}"\n`;
-      }
-      prompt += `• Размер: ${selectedElement.rect.width} × ${selectedElement.rect.height} px\n`;
-      prompt += `• Путь в DOM: ${selectedElement.selector}\n`;
-
-      // Подобранные стили (если пользователь настраивал регуляторы)
-      const overrides: string[] = [];
-      if (tunerState.bgOpacity === 0) {
-        overrides.push(`заливка: сделать фон полностью прозрачным (bg-transparent / background: transparent)`);
-      } else if (tunerState.bgOpacity < 100) {
-        overrides.push(`заливка: полупрозрачный фон ${tunerState.bgOpacity}%`);
-      }
-
-      if (tunerState.align === 'left') {
-        overrides.push(`выравнивание: по левому краю (text-left / self-start)`);
-      } else if (tunerState.align === 'center') {
-        overrides.push(`выравнивание: по центру (text-center / self-center / mx-auto)`);
-      } else if (tunerState.align === 'right') {
-        overrides.push(`выравнивание: по правому краю (text-right / self-end)`);
-      }
-
-      if (tunerState.heightUnit !== 'auto' && tunerState.heightVal > 0) {
-        overrides.push(`высота: ${tunerState.heightVal}${tunerState.heightUnit} (h-[${tunerState.heightVal}${tunerState.heightUnit}])`);
-      }
-      if (tunerState.widthUnit !== 'auto' && tunerState.widthVal > 0) {
-        overrides.push(`ширина: ${tunerState.widthVal}${tunerState.widthUnit} (w-[${tunerState.widthVal}${tunerState.widthUnit}])`);
-      }
-      if (tunerState.radiusVal > 0) {
-        overrides.push(`скругление: ${tunerState.radiusVal}px (rounded-[${tunerState.radiusVal}px])`);
-      }
-
-      if (overrides.length > 0) {
-        prompt += `\n🎨 ПОДОБРАННЫЕ НАСТРОЙКИ (ПРИМЕНИТЬ В КОДЕ):\n${overrides.map(o => `• ${o}`).join('\n')}\n`;
-      }
-    }
-
-    prompt += `\nЧТО НУЖНО СДЕЛАТЬ:\n${noteText.trim() ? noteText.trim() : 'Проверь стили и поведение этого элемента.'}`;
-
-    navigator.clipboard.writeText(prompt).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
+  const handleRestoreHiddenLayers = () => {
+    const docs = getTargetIframeDocs();
+    docs.forEach((d) => {
+      restoreAllDomHiddenLayers(d);
     });
+    hiddenElementsRef.current.forEach((h) => {
+      h.el.style.display = h.prevDisplay;
+      h.el.style.pointerEvents = h.prevPointerEvents;
+    });
+    hiddenElementsRef.current = [];
+    setHiddenCount(0);
+    refreshDesignLayers(activeBuilderLayerId);
+
+    const doc = getPrimaryIframeDoc();
+    if (doc && activeBuilderLayerId) {
+      const el = findDomElementByLayerId(doc, activeBuilderLayerId);
+      if (el) selectDomElement(el, doc);
+    }
+  };
+
+  const handleNavigateHierarchy = (dir: 'parent' | 'child') => {
+    const doc = getPrimaryIframeDoc();
+    if (!doc) return;
+
+    let currentEl = inspectedTargetRef.current;
+    if (!currentEl && activeBuilderLayerId) {
+      currentEl = findDomElementByLayerId(doc, activeBuilderLayerId);
+    }
+    if (!currentEl) {
+      const stack = stackedElementsRef.current;
+      if (stack.length > 0) {
+        const nextIdx = dir === 'parent' ? activeLayerIndex + 1 : activeLayerIndex - 1;
+        if (nextIdx >= 0 && nextIdx < stack.length) {
+          selectDomElement(stack[nextIdx], doc, stack, nextIdx);
+        }
+      }
+      return;
+    }
+
+    if (dir === 'parent') {
+      const parentEl = currentEl.parentElement?.closest('[data-ag-layer-id]') as HTMLElement | null;
+      if (parentEl) {
+        selectDomElement(parentEl, doc);
+      }
+    } else {
+      const childEl = currentEl.querySelector('[data-ag-layer-id]') as HTMLElement | null;
+      if (childEl) {
+        selectDomElement(childEl, doc);
+      }
+    }
+  };
+
+  // --- VISUAL WEBSITE BUILDER & LAYER TREE ENGINE ---
+  const [dockMode, setDockMode] = useState<'inspector' | 'builder'>('inspector');
+  const [dockPosition, setDockPosition] = useState<'left' | 'right'>('left');
+  const [dockWidth, setDockWidth] = useState<number>(350);
+  const [isResizingDock, setIsResizingDock] = useState<boolean>(false);
+  const [inspectorAgentOpen, setInspectorAgentOpen] = useState<boolean>(false);
+  const [checkedLayerIds, setCheckedLayerIds] = useState<string[]>([]);
+  const [snapGridSize, setSnapGridSize] = useState<number>(8);
+  const [builderOps, setBuilderOps] = useState<BuilderOperationRecord[]>([]);
+  const [builderEnqueuedToast, setBuilderEnqueuedToast] = useState(false);
+  const [canvasEyedropperTarget, setCanvasEyedropperTarget] = useState<'bg' | 'text' | 'icon' | null>(
+    null
+  );
+  const [hoveredEyedropperHex, setHoveredEyedropperHex] = useState<string | null>(null);
+  const [latestScreenshot, setLatestScreenshot] =
+    useState<VisualTechnicalScreenshotResult | null>(null);
+
+  // Interactive Dock Width Resizer (280px - 620px)
+  useEffect(() => {
+    if (!isResizingDock) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const rawWidth =
+        dockPosition === 'left' ? e.clientX : window.innerWidth - e.clientX;
+      const clamped = Math.max(280, Math.min(620, Math.round(rawWidth)));
+      setDockWidth(clamped);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingDock(false);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizingDock, dockPosition]);
+
+  // Replay active builder state onto newly mounted secondary screens when slots change
+  useEffect(() => {
+    if (!liveMultiScreenSync || slots.length < 2 || designLayers.length === 0) return;
+    const replayToSecondary = () => {
+      const docs = getTargetIframeDocs();
+      if (docs.length < 2) return;
+      const secondaryDocs = docs.slice(1);
+      secondaryDocs.forEach((secDoc) => {
+        const secLayers = extractIframeDesignLayers(secDoc);
+        if (secLayers.length === 0) return;
+        designLayers.forEach((layer) => {
+          if (
+            layer.textValue !== undefined &&
+            layer.initialTextValue !== undefined &&
+            layer.textValue !== layer.initialTextValue
+          ) {
+            updateDomLayerText(secDoc, layer.id, layer.textValue);
+          }
+          if (layer.iconPresetId || layer.customSvgCode || layer.iconColor) {
+            updateDomLayerIcon(secDoc, layer.id, {
+              presetId: layer.iconPresetId,
+              customSvg: layer.customSvgCode,
+              iconColor: layer.iconColor,
+            });
+          }
+          if (
+            layer.transform.dx !== 0 ||
+            layer.transform.dy !== 0 ||
+            layer.transform.responsivePreset !== 'none' ||
+            (layer.transform.boxAlign && layer.transform.boxAlign !== 'none') ||
+            (layer.transform.contentAlign && layer.transform.contentAlign !== 'none') ||
+            Math.abs(layer.transform.width - layer.initialRect.width) > 1 ||
+            Math.abs(layer.transform.height - layer.initialRect.height) > 1 ||
+            layer.transform.zIndex !== 0
+          ) {
+            applyLayerTransformToDom(secDoc, layer.id, layer.transform);
+          }
+        });
+      });
+    };
+    const t1 = setTimeout(replayToSecondary, 700);
+    const t2 = setTimeout(replayToSecondary, 1300);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [slots.length, liveMultiScreenSync, designLayers, getTargetIframeDocs]);
+
+  // Sync the interactive 8-handle Bounding Box Gizmo inside the iframe when in builder mode
+  useEffect(() => {
+    const doc = getPrimaryIframeDoc();
+    if (!doc || !doc.body) return;
+
+    if (dockTab !== 'layers') {
+      syncBuilderGizmoInIframe(doc, null, snapGridSize, () => {});
+      if (inspectedTargetRef.current && inspectedDocRef.current) {
+        updateSelectedOverlay(inspectedTargetRef.current, inspectedDocRef.current, showBoxModel);
+      }
+      return;
+    }
+
+    clearSelectedOverlay(doc);
+    syncBuilderGizmoInIframe(
+      doc,
+      activeBuilderLayerId,
+      snapGridSize,
+      (layerId, patch, opType) => {
+        // Broadcast Gizmo drag/resize to all secondary screens if liveMultiScreenSync is enabled
+        const docs = getTargetIframeDocs();
+        docs.slice(1).forEach((secDoc) => {
+          applyLayerTransformToDom(secDoc, layerId, patch);
+        });
+
+        const extracted = extractIframeDesignLayers(doc);
+        setDesignLayers(extracted);
+        const layerObj = extracted.find((l) => l.id === layerId);
+        if (layerObj) {
+          setBuilderOps((prev) => [
+            {
+              id: `op-${Date.now()}`,
+              timestamp: new Date().toLocaleTimeString('ru-RU'),
+              type: opType,
+              layerId,
+              layerName: layerObj.name,
+              summary:
+                opType === 'move'
+                  ? `Перемещение ${layerObj.name} на (${patch.dx}px, ${patch.dy}px)`
+                  : patch.widthUnit === '%'
+                  ? `Адаптивное растягивание ${layerObj.name}: ${patch.widthPercent}%`
+                  : `Растягивание рамки ${layerObj.name} до ${patch.width}×${patch.height}px`,
+              tailwindHint: formatLayerBuilderDiff(layerObj, []).tailwindClasses,
+            },
+            ...prev.slice(0, 19),
+          ]);
+        }
+      },
+      (clickedLayerId) => {
+        setActiveBuilderLayerId(clickedLayerId);
+        const el = findDomElementByLayerId(doc, clickedLayerId);
+        if (el) {
+          selectDomElement(el, doc);
+        }
+      },
+      (editedLayerId, newInlineText) => {
+        const docs = getTargetIframeDocs();
+        docs.forEach((d) => updateDomLayerText(d, editedLayerId, newInlineText));
+        refreshDesignLayers(editedLayerId);
+      }
+    );
+  }, [
+    dockTab,
+    activeBuilderLayerId,
+    snapGridSize,
+    showBoxModel,
+    getPrimaryIframeDoc,
+    getTargetIframeDocs,
+    refreshDesignLayers,
+    selectDomElement,
+  ]);
+
+  const handleSwitchToBuilderMode = () => {
+    setDockTab('layers');
+    setTimeout(() => refreshDesignLayers(), 60);
+  };
+
+  const handleEnableAdaptiveTwoScreens = () => {
+    setSlots([
+      { id: 'slot-1', deviceKey: 'iphone16pro', rotated: false },
+      { id: `slot-2-${Date.now()}`, deviceKey: 'compact320', rotated: false },
+    ]);
+    setZoom(0.76);
+  };
+
+  const handleBuilderTransformLayer = (
+    layerId: string,
+    patch: Partial<DesignLayerTransform>,
+    opSummary: string
+  ) => {
+    const docs = getTargetIframeDocs();
+    if (docs.length === 0) return;
+    let updated: DesignLayerNode | null = null;
+    docs.forEach((d, idx) => {
+      const res = applyLayerTransformToDom(d, layerId, patch);
+      if (idx === 0) updated = res;
+    });
+    const extracted = extractIframeDesignLayers(docs[0]);
+    setDesignLayers(extracted);
+    const finalNode = updated || extracted.find((l) => l.id === layerId);
+    if (finalNode) {
+      setBuilderOps((prev) => [
+        {
+          id: `op-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString('ru-RU'),
+          type:
+            patch.responsivePreset !== undefined || patch.widthUnit !== undefined
+              ? 'responsive'
+              : patch.width !== undefined || patch.height !== undefined
+              ? 'resize'
+              : 'move',
+          layerId,
+          layerName: finalNode.name,
+          summary: opSummary,
+          tailwindHint: formatLayerBuilderDiff(finalNode, []).tailwindClasses,
+        },
+        ...prev.slice(0, 19),
+      ]);
+    }
+  };
+
+  const handleBuilderUpdateText = (layerId: string, newText: string) => {
+    const docs = getTargetIframeDocs();
+    if (docs.length === 0) return;
+    docs.forEach((d) => updateDomLayerText(d, layerId, newText));
+    const extracted = extractIframeDesignLayers(docs[0]);
+    setDesignLayers(extracted);
+    const target = extracted.find((l) => l.id === layerId);
+    if (target) {
+      setBuilderOps((prev) => [
+        {
+          id: `op-txt-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString('ru-RU'),
+          type: 'text',
+          layerId,
+          layerName: target.name,
+          summary: `Текст в ${target.name} изменён на "${newText}"`,
+          tailwindHint: '',
+          jsxStructuralHint: `Обновить текстовое содержимое узла <${target.name}> на "${newText}"`,
+        },
+        ...prev.slice(0, 19),
+      ]);
+    }
+  };
+
+  const handleBuilderUpdateTextColor = useCallback(
+    (layerId: string, colorHex: string) => {
+      const docs = getTargetIframeDocs();
+      if (docs.length === 0) return;
+      docs.forEach((d) => updateDomLayerTextColor(d, layerId, colorHex));
+      const extracted = extractIframeDesignLayers(docs[0]);
+      setDesignLayers(extracted);
+      const target = extracted.find((l) => l.id === layerId);
+      if (target) {
+        setBuilderOps((prev) => [
+          {
+            id: `op-txt-color-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString('ru-RU'),
+            type: 'text',
+            layerId,
+            layerName: target.name,
+            summary: `Цвет текста ${target.name}: ${colorHex}`,
+            tailwindHint: `text-[${colorHex}]`,
+            jsxStructuralHint: `Установить цвет текста узла <${target.name}>: text-[${colorHex}]`,
+          },
+          ...prev.slice(0, 19),
+        ]);
+      }
+    },
+    [getTargetIframeDocs]
+  );
+
+  const handleBuilderUpdateBgColor = useCallback(
+    (layerId: string, colorHex: string) => {
+      const docs = getTargetIframeDocs();
+      if (docs.length === 0) return;
+      docs.forEach((d) => updateDomLayerBgColor(d, layerId, colorHex));
+      const extracted = extractIframeDesignLayers(docs[0]);
+      setDesignLayers(extracted);
+      const target = extracted.find((l) => l.id === layerId);
+      if (target) {
+        setBuilderOps((prev) => [
+          {
+            id: `op-bg-color-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString('ru-RU'),
+            type: 'style',
+            layerId,
+            layerName: target.name,
+            summary: `Цвет фона ${target.name}: ${colorHex}`,
+            tailwindHint: `bg-[${colorHex}]`,
+            jsxStructuralHint: `Установить цвет фона узла <${target.name}>: bg-[${colorHex}]`,
+          },
+          ...prev.slice(0, 19),
+        ]);
+      }
+    },
+    [getTargetIframeDocs]
+  );
+
+  const handleBuilderUpdateIcon = useCallback(
+    (
+      layerId: string,
+      options: { presetId?: string; customSvg?: string; iconColor?: string },
+      summary: string
+    ) => {
+      const docs = getTargetIframeDocs();
+      if (docs.length === 0) return;
+      docs.forEach((d) => updateDomLayerIcon(d, layerId, options));
+      const extracted = extractIframeDesignLayers(docs[0]);
+      setDesignLayers(extracted);
+      const target = extracted.find((l) => l.id === layerId);
+      if (target) {
+        setBuilderOps((prev) => [
+          {
+            id: `op-icon-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString('ru-RU'),
+            type: 'icon',
+            layerId,
+            layerName: target.name,
+            summary,
+            tailwindHint: options.iconColor ? `text-[${options.iconColor}]` : '',
+            jsxStructuralHint: summary,
+          },
+          ...prev.slice(0, 19),
+        ]);
+      }
+    },
+    [getTargetIframeDocs]
+  );
+
+  // Interactive Canvas Eyedropper on the Phone Mockup Iframes
+  useEffect(() => {
+    if (!canvasEyedropperTarget) {
+      return;
+    }
+
+    const iframes = Array.from(iframesRef.current.values()).filter(Boolean);
+    const cleanupFns: Array<() => void> = [];
+
+    iframes.forEach((iframe) => {
+      let doc: Document | null = null;
+      try {
+        doc = iframe.contentDocument || iframe.contentWindow?.document || null;
+      } catch {
+        return;
+      }
+      if (!doc || !doc.body) return;
+
+      const win = doc.defaultView || window;
+      const prevCursor = doc.body.style.cursor;
+      doc.body.style.cursor = 'crosshair';
+      doc.body.setAttribute('data-ag-eyedropper-active', 'true');
+
+      // 1:1 rendered surface pixel buffer of the displayed mobile screen
+      let surfaceCanvas = renderScreenSurfaceCanvas(doc);
+      const refreshSurface = () => {
+        if (doc) {
+          surfaceCanvas = renderScreenSurfaceCanvas(doc);
+        }
+      };
+
+      // Floating loupe above the eyedropper cursor: color square + #HEX code
+      let loupe = doc.getElementById('__antigravity_eyedropper_loupe__') as HTMLDivElement | null;
+      if (!loupe) {
+        loupe = doc.createElement('div');
+        loupe.id = '__antigravity_eyedropper_loupe__';
+        loupe.setAttribute('data-testid', 'eyedropper-cursor-loupe');
+        loupe.style.cssText = [
+          'position: fixed',
+          'pointer-events: none',
+          'z-index: 2147483647',
+          'display: none',
+          'align-items: center',
+          'gap: 6px',
+          'padding: 4px 8px',
+          'border-radius: 6px',
+          'background: #141417',
+          'border: 1px solid #2E2E36',
+          'box-shadow: 0 8px 20px rgba(0, 0, 0, 0.65)',
+          'color: #FAFAFA',
+          'font-family: ui-monospace, SFMono-Regular, Menlo, monospace',
+          'font-size: 11px',
+          'font-weight: 600',
+          'line-height: 1',
+          'white-space: nowrap',
+          'transform: translate(-50%, -135%)',
+        ].join(';');
+
+        const swatch = doc.createElement('span');
+        swatch.id = '__antigravity_eyedropper_swatch__';
+        swatch.style.cssText = [
+          'width: 12px',
+          'height: 12px',
+          'border-radius: 3px',
+          'border: 1px solid rgba(255, 255, 255, 0.35)',
+          'flex-shrink: 0',
+          'background: #0E0D15',
+        ].join(';');
+
+        const hexLabel = doc.createElement('span');
+        hexLabel.id = '__antigravity_eyedropper_hex__';
+        hexLabel.textContent = '#0E0D15';
+
+        loupe.appendChild(swatch);
+        loupe.appendChild(hexLabel);
+        doc.body.appendChild(loupe);
+      }
+
+      const onMove = (e: MouseEvent) => {
+        if (!doc) return;
+        const sampled = sampleScreenColorAtPoint(doc, e.clientX, e.clientY, surfaceCanvas);
+        setHoveredEyedropperHex(sampled);
+
+        if (loupe) {
+          loupe.style.display = 'flex';
+          // Clamp near top edge so badge remains visible inside viewport
+          const clampedX = Math.max(46, Math.min((win.innerWidth || 390) - 46, e.clientX));
+          const clampedY = Math.max(32, e.clientY);
+          loupe.style.left = `${clampedX}px`;
+          loupe.style.top = `${clampedY}px`;
+          const swatchEl = doc.getElementById('__antigravity_eyedropper_swatch__') as HTMLElement | null;
+          const hexEl = doc.getElementById('__antigravity_eyedropper_hex__') as HTMLElement | null;
+          if (swatchEl) swatchEl.style.backgroundColor = sampled;
+          if (hexEl) hexEl.textContent = sampled;
+        }
+      };
+
+      const onLeave = () => {
+        if (loupe) {
+          loupe.style.display = 'none';
+        }
+      };
+
+      const onClick = (e: MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        if (!doc) return;
+        const sampled = sampleScreenColorAtPoint(doc, e.clientX, e.clientY, surfaceCanvas);
+        const targetLayerId = activeBuilderLayerId || designLayers[0]?.id;
+        if (targetLayerId) {
+          if (canvasEyedropperTarget === 'bg') {
+            handleBuilderUpdateBgColor(targetLayerId, sampled);
+          } else if (canvasEyedropperTarget === 'text') {
+            handleBuilderUpdateTextColor(targetLayerId, sampled);
+          } else {
+            handleBuilderUpdateIcon(
+              targetLayerId,
+              { iconColor: sampled },
+              `Цвет иконки (пипетка с макета): ${sampled}`
+            );
+          }
+        }
+        setCanvasEyedropperTarget(null);
+        setHoveredEyedropperHex(null);
+      };
+
+      win.addEventListener('mousemove', onMove, true);
+      win.addEventListener('mouseleave', onLeave, true);
+      win.addEventListener('scroll', refreshSurface, true);
+      win.addEventListener('click', onClick, true);
+
+      cleanupFns.push(() => {
+        if (doc && doc.body) {
+          doc.body.style.cursor = prevCursor;
+          doc.body.removeAttribute('data-ag-eyedropper-active');
+          win.removeEventListener('mousemove', onMove, true);
+          win.removeEventListener('mouseleave', onLeave, true);
+          win.removeEventListener('scroll', refreshSurface, true);
+          win.removeEventListener('click', onClick, true);
+          const existingLoupe = doc.getElementById('__antigravity_eyedropper_loupe__');
+          if (existingLoupe) existingLoupe.remove();
+        }
+      });
+    });
+
+    return () => cleanupFns.forEach((fn) => fn());
+  }, [
+    canvasEyedropperTarget,
+    activeBuilderLayerId,
+    designLayers,
+    handleBuilderUpdateBgColor,
+    handleBuilderUpdateTextColor,
+    handleBuilderUpdateIcon,
+  ]);
+
+  const handleCaptureSlotScreenshot = (
+    slotId: string,
+    cropRect: { x: number; y: number; width: number; height: number },
+    mode: 'full' | 'region'
+  ) => {
+    const iframe =
+      iframesRef.current.get(slotId) || Array.from(iframesRef.current.values())[0];
+    const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
+    if (!doc) return;
+    const slot = slots.find((s) => s.id === slotId) || slots[0];
+    const spec = PREVIEW_DEVICES[slot?.deviceKey] || PREVIEW_DEVICES.iphone16pro;
+    const shot = captureVisualTechnicalScreenshot(doc, cropRect, spec.name, mode);
+    setLatestScreenshot(shot);
+  };
+
+  const handleEnqueueScreenshot = (shot: VisualTechnicalScreenshotResult) => {
+    const nextPin =
+      agentQueue.length > 0 ? Math.max(...agentQueue.map((i) => i.pinNumber)) + 1 : 1;
+    const firstObj = shot.objects[0];
+    const objectNamesSummary = shot.objects
+      .slice(0, 6)
+      .map((o) => `${o.name} (<${o.tag}>)`)
+      .join(', ');
+
+    const newItem: AgentQueueItem = {
+      id: `shot-task-${Date.now()}`,
+      pinNumber: nextPin,
+      createdAt: shot.timestamp,
+      slotDeviceName: shot.deviceName,
+      priority: 'high',
+      directiveId: 'responsive-320',
+      note: `Визуально-технический скриншот (${
+        shot.mode === 'full' ? 'весь экран' : `область ${shot.cropRect.width}×${shot.cropRect.height}px`
+      }). Объекты в кадре (${shot.objects.length}): ${objectNamesSummary}`,
+      element: {
+        tag: firstObj?.tag || 'section',
+        className: `crop-[${shot.cropRect.x},${shot.cropRect.y},${shot.cropRect.width}x${shot.cropRect.height}]`,
+        textSnippet:
+          firstObj?.textSnippet || `Объектов в скриншоте: ${shot.objects.length}`,
+        rect: {
+          top: shot.cropRect.y,
+          left: shot.cropRect.x,
+          width: shot.cropRect.width,
+          height: shot.cropRect.height,
+        },
+        selector: firstObj?.selector || 'main',
+        componentName: firstObj?.name || 'ScreenRegionCapture',
+        sourceFile: firstObj?.sourceFile || 'components/demo/DemoApp.tsx',
+        sourceLine: firstObj?.sourceLine || 1,
+      },
+      diffs: shot.objects.slice(0, 8).map((o) => ({
+        property: `Объект #${o.index}: ${o.name}`,
+        before: `${o.rect.width}×${o.rect.height}px @ (${o.rect.x},${o.rect.y})`,
+        after: o.textSnippet ? `"${o.textSnippet}" (${o.colorHex})` : `Цвет: ${o.colorHex}`,
+        tailwindSuggestion: `<${o.tag}> ${o.sourceFile || ''}${o.sourceLine ? `:${o.sourceLine}` : ''}`,
+      })),
+    };
+
+    setAgentQueue((prev) => [...prev, newItem]);
+  };
+
+  const handleBuilderReorderLayer = (layerId: string, direction: 'up' | 'down') => {
+    const docs = getTargetIframeDocs();
+    if (docs.length === 0) return;
+    let moved = false;
+    docs.forEach((d, idx) => {
+      const ok = swapDomLayerOrder(d, layerId, direction);
+      if (idx === 0) moved = ok;
+    });
+    if (moved) {
+      const extracted = extractIframeDesignLayers(docs[0]);
+      setDesignLayers(extracted);
+      const target = extracted.find((l) => l.id === layerId);
+      if (target) {
+        setBuilderOps((prev) => [
+          {
+            id: `op-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString('ru-RU'),
+            type: 'reorder',
+            layerId,
+            layerName: target.name,
+            summary: `Перестановка слоя ${target.name} ${direction === 'up' ? 'выше' : 'ниже'} в DOM`,
+            tailwindHint: 'Изменение порядка JSX-узлов в родителе',
+            jsxStructuralHint: `Переместить JSX-узел <${target.name}> ${
+              direction === 'up'
+                ? 'выше предыдущего соседнего элемента'
+                : 'ниже следующего соседнего элемента'
+            }`,
+          },
+          ...prev.slice(0, 19),
+        ]);
+      }
+    }
+  };
+
+  const handleBuilderGroupLayers = (customIds?: string[]) => {
+    const docs = getTargetIframeDocs();
+    if (docs.length === 0) return;
+    const idsToGroup = customIds || checkedLayerIds;
+    if (idsToGroup.length < 2) return;
+    const names = designLayers
+      .filter((l) => idsToGroup.includes(l.id))
+      .map((l) => l.name)
+      .join(' + ');
+    let newGroupId: string | null = null;
+    docs.forEach((d, idx) => {
+      const gid = groupDomLayers(d, idsToGroup);
+      if (idx === 0) newGroupId = gid;
+    });
+    if (newGroupId) {
+      setCheckedLayerIds([]);
+      const extracted = extractIframeDesignLayers(docs[0]);
+      setDesignLayers(extracted);
+      setActiveBuilderLayerId(newGroupId);
+      const groupNode = extracted.find((l) => l.id === newGroupId);
+      setBuilderOps((prev) => [
+        {
+          id: `op-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString('ru-RU'),
+          type: 'group',
+          layerId: newGroupId!,
+          layerName: groupNode?.name || 'Group',
+          summary: `Группировка слоёв (${names}) в единый контейнер`,
+          tailwindHint: 'flex flex-col gap-2 p-2 rounded-2xl w-full',
+          jsxStructuralHint: `Обернуть элементы [${names}] в общий контейнер <div className="flex flex-col gap-2 w-full">`,
+        },
+        ...prev.slice(0, 19),
+      ]);
+    }
+  };
+
+  const handleBuilderUngroupLayer = (groupLayerId: string) => {
+    const docs = getTargetIframeDocs();
+    if (docs.length === 0) return;
+    const groupNode = designLayers.find((l) => l.id === groupLayerId);
+    let ok = false;
+    docs.forEach((d, idx) => {
+      const res = ungroupDomLayer(d, groupLayerId);
+      if (idx === 0) ok = res;
+    });
+    if (ok) {
+      const extracted = extractIframeDesignLayers(docs[0]);
+      setDesignLayers(extracted);
+      setActiveBuilderLayerId(extracted[0]?.id || null);
+      if (groupNode) {
+        setBuilderOps((prev) => [
+          {
+            id: `op-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString('ru-RU'),
+            type: 'ungroup',
+            layerId: groupLayerId,
+            layerName: groupNode.name,
+            summary: `Разгруппировка контейнера ${groupNode.name}`,
+            tailwindHint: '',
+            jsxStructuralHint: `Убрать обёртку группы ${groupNode.name} и вернуть дочерние элементы в родительский контейнер`,
+          },
+          ...prev.slice(0, 19),
+        ]);
+      }
+    }
+  };
+
+  const handleBuilderDuplicateLayer = (layerId: string) => {
+    const docs = getTargetIframeDocs();
+    if (docs.length === 0) return;
+    const orig = designLayers.find((l) => l.id === layerId);
+    let clonedId: string | null = null;
+    docs.forEach((d, idx) => {
+      const cid = duplicateDomLayer(d, layerId);
+      if (idx === 0) clonedId = cid;
+    });
+    if (clonedId) {
+      const extracted = extractIframeDesignLayers(docs[0]);
+      setDesignLayers(extracted);
+      setActiveBuilderLayerId(clonedId);
+      if (orig) {
+        setBuilderOps((prev) => [
+          {
+            id: `op-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString('ru-RU'),
+            type: 'duplicate',
+            layerId: clonedId!,
+            layerName: orig.name,
+            summary: `Дублирование слоя ${orig.name}`,
+            tailwindHint: '',
+            jsxStructuralHint: `Продублировать компонент <${orig.name}> сразу после оригинала`,
+          },
+          ...prev.slice(0, 19),
+        ]);
+      }
+    }
+  };
+
+  const handleEnqueueBuilderLayer = (layer: DesignLayerNode) => {
+    const diffInfo = formatLayerBuilderDiff(layer, builderOps);
+    const nextPin = agentQueue.length > 0 ? Math.max(...agentQueue.map((i) => i.pinNumber)) + 1 : 1;
+
+    const diffs = diffInfo.summaryLines.map((line) => ({
+      property: 'Конструктор слоёв',
+      before: layer.initialTextValue || `${layer.initialRect.width}×${layer.initialRect.height}px`,
+      after: line,
+      tailwindSuggestion: diffInfo.tailwindClasses || 'w-full max-w-full',
+    }));
+
+    const newItem: AgentQueueItem = {
+      id: `builder-task-${Date.now()}`,
+      pinNumber: nextPin,
+      createdAt: new Date().toLocaleTimeString('ru-RU'),
+      slotDeviceName:
+        liveMultiScreenSync && slots.length > 1
+          ? `${inspectedSlotName} (+${slots.length - 1} экр.)`
+          : inspectedSlotName,
+      priority: 'high',
+      directiveId: selectedDirectiveId || 'responsive-320',
+      note:
+        noteText
+          ? `${noteText} (${diffInfo.summaryLines.join('; ') || 'правка стилей'})`
+          : diffInfo.summaryLines.length > 0
+          ? `Применить изменения конструктора слоёв для ${layer.name}: ${diffInfo.summaryLines.join('; ')}`
+          : `Обновить расположение, текст и адаптивную вёрстку слоя ${layer.name}`,
+      element: {
+        tag: layer.tag,
+        className: diffInfo.tailwindClasses,
+        textSnippet: layer.textValue || layer.name,
+        rect: {
+          top: layer.currentRect.y,
+          left: layer.currentRect.x,
+          width: layer.currentRect.width,
+          height: layer.currentRect.height,
+        },
+        selector: layer.selector || (selectedElement?.selector || `.${layer.name}`),
+        componentName: layer.name,
+        sourceFile: layer.sourceFile || selectedElement?.sourceFile || 'components/demo/DemoApp.tsx',
+        sourceLine: layer.sourceLine || selectedElement?.sourceLine || 97,
+      },
+      diffs,
+    };
+
+    setAgentQueue((prev) => [...prev, newItem]);
+    setBuilderEnqueuedToast(true);
+    setTimeout(() => setBuilderEnqueuedToast(false), 2000);
   };
 
   return (
     <div
-      className={`min-h-screen flex flex-col p-3 sm:p-5 font-sans select-none transition-colors duration-200 ${currentBg.bg} ${currentBg.text}`}
+      className={`h-screen overflow-hidden flex flex-col transition-colors duration-150 ${currentTheme.canvasBg} ${currentTheme.textPrimary}`}
     >
-      {/* TOP FLOATING TOOLBAR */}
-      <header className="flex flex-wrap items-center justify-between gap-2.5 mb-3 px-2">
-        {/* LEFT TOOLBAR: WORKSPACE CONTROLS */}
-        <div className="flex items-center gap-2">
-          {/* Add Screen Button (Mobile View style) */}
-          <button
-            onClick={handleAddSlot}
-            disabled={slots.length >= 3}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer shadow-sm ${
-              slots.length >= 3
-                ? 'opacity-40 cursor-not-allowed'
-                : isDark
-                ? 'bg-[#13121F] border-white/10 text-zinc-200 hover:text-white hover:border-[#B833FF]'
-                : 'bg-white border-zinc-300 text-zinc-800 hover:text-black hover:border-[#B833FF]'
-            }`}
-            title="Добавить еще один экран для параллельного сравнения (до 3 экранов)"
-          >
-            <span className="text-[#B833FF] font-black">+</span>
-            <span>Экран ({slots.length}/3)</span>
-          </button>
-
-          {/* Bezel Toggle (Frameless vs Realistic Bezel) */}
-          <button
-            onClick={() => setShowBezel(b => !b)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer shadow-sm ${
-              !showBezel
-                ? 'bg-[#B833FF] text-white border-[#B833FF]'
-                : isDark
-                ? 'bg-[#13121F] border-white/10 text-zinc-200 hover:text-white hover:border-[#B833FF]'
-                : 'bg-white border-zinc-300 text-zinc-800 hover:border-[#B833FF]'
-            }`}
-            title="Переключить режим: с рамкой смартфона или чистый безрамочный viewport"
-          >
-            <span>{showBezel ? '📱 Рамка' : '🔲 Без рамки'}</span>
-          </button>
-
-          {/* Mobile Tunnel QR Button */}
-          <button
-            onClick={handleOpenTunnel}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer shadow-sm ${
-              isDark
-                ? 'bg-[#13121F] border-white/10 text-zinc-200 hover:text-white hover:border-[#B833FF]'
-                : 'bg-white border-zinc-300 text-zinc-800 hover:text-black hover:border-[#B833FF]'
-            }`}
-            title="Открыть на реальном смартфоне через QR-код"
-          >
-            <span>📲</span>
-            <span>На телефон</span>
-            {tunnelUrl && (
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse ml-0.5" />
-            )}
-          </button>
+      {/* UNIFIED COMPACT SINGLE-ROW HEADER & TOOLBAR (44px, Linear / Figma Style) */}
+      <header
+        className={`h-11 shrink-0 flex items-center justify-between gap-3 px-3 border-b ${currentTheme.surfaceBg} ${currentTheme.borderClass}`}
+      >
+        {/* Left Zone: Brand */}
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="text-xs font-bold tracking-tight whitespace-nowrap shrink-0 font-display px-1 select-none">
+            Viewer 2.0
+          </span>
         </div>
 
-        {/* RIGHT TOOLBAR: THEME TOGGLE, REFRESH, ZOOM */}
-        <div className="flex items-center gap-2">
-          {/* Переключение ночного и светлого режима одной иконкой (солнце-луна) */}
-          <button
-            onClick={() => setBgKey(prev => (prev === 'white' ? 'cyber' : 'white'))}
-            title={isDark ? 'Переключить на светлую тему' : 'Переключить на тёмную тему'}
-            aria-label="Переключить тему"
-            className={`w-8 h-8 rounded-xl border flex items-center justify-center transition-all cursor-pointer shadow-sm ${
-              isDark
-                ? 'bg-[#13121F] border-white/10 text-amber-300 hover:text-white hover:border-[#B833FF]'
-                : 'bg-white border-zinc-300 text-purple-600 hover:text-black hover:border-[#B833FF]'
-            }`}
-          >
-            {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
-
-          {/* Refresh Frame Button */}
-          <button
-            onClick={() => {
-              iframesRef.current.forEach(iframe => {
-                try {
-                  iframe.src = iframe.src;
-                } catch {}
-              });
-            }}
-            title="Обновить все экраны"
-            className={`w-8 h-8 rounded-xl border flex items-center justify-center transition-all cursor-pointer shadow-sm ${
-              isDark
-                ? 'bg-[#13121F] border-white/10 text-zinc-300 hover:text-white hover:border-[#B833FF]'
-                : 'bg-white border-zinc-300 text-zinc-700 hover:text-black hover:border-[#B833FF]'
-            }`}
-          >
-            🔄
-          </button>
-
-          {/* Vertical Zoom Popover */}
-          <div className="relative" ref={zoomSliderRef}>
-            <button
-              onClick={() => setShowZoomSlider(prev => !prev)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer shadow-sm ${
-                showZoomSlider
-                  ? 'bg-[#B833FF] text-white border-[#B833FF]'
-                  : isDark
-                  ? 'bg-[#13121F] border-white/10 text-zinc-200 hover:border-[#B833FF]'
-                  : 'bg-white border-zinc-300 text-zinc-800 hover:border-[#B833FF]'
-              }`}
-              title="Нажмите, чтобы настроить масштаб от 20% до 200%"
-            >
-              <span>{Math.round(zoom * 100)}%</span>
-              <span className="text-[10px] opacity-70">▾</span>
-            </button>
-
-            {showZoomSlider && (
-              <div
-                className={`absolute right-0 top-full mt-2 p-4 rounded-2xl border shadow-2xl z-50 flex flex-col items-center gap-3 w-20 transition-all ${
-                  isDark ? 'bg-[#181729] border-white/15' : 'bg-white border-zinc-300 shadow-zinc-400/40'
+        {/* Center/Right Compact Workspace Controls */}
+        <div className="flex items-center gap-1.5 shrink-0">
+              {/* Add Screen Slot */}
+              <button
+                type="button"
+                disabled={slots.length >= 3}
+                title={`Добавить экран предпросмотра (сейчас открыто ${slots.length} из 3)`}
+                aria-label="Добавить экран"
+                onClick={() => {
+                  if (slots.length >= 3) return;
+                  const nextKey = slots.length === 1 ? 's24ultra' : 'iphonese';
+                  setSlots((prev) => [
+                    ...prev,
+                    { id: `slot-${Date.now()}`, deviceKey: nextKey, rotated: false },
+                  ]);
+                }}
+                className={`h-7 px-2 rounded-md border text-[11px] font-medium flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                  slots.length >= 3
+                    ? 'opacity-35 cursor-not-allowed border-zinc-800'
+                    : isDark
+                    ? 'bg-[#18181C] border-[#27272A] text-zinc-300 hover:bg-zinc-800'
+                    : 'bg-white border-zinc-300 text-zinc-700 hover:bg-zinc-100'
                 }`}
               >
-                <span className="text-[11px] font-mono font-bold text-[#B833FF]">200%</span>
+                <Plus className="w-3.5 h-3.5" />
+                <span className="font-mono">{slots.length}/3</span>
+              </button>
 
-                <div className="h-44 flex items-center justify-center py-2">
-                  <input
-                    type="range"
-                    min="20"
-                    max="200"
-                    step="5"
-                    value={Math.round(zoom * 100)}
-                    onChange={e => setZoom(Number(e.target.value) / 100)}
-                    className="accent-[#B833FF] cursor-pointer"
-                    style={{
-                      writingMode: 'vertical-lr',
-                      direction: 'rtl',
-                      height: '140px',
-                      width: '24px',
-                    }}
-                  />
-                </div>
+              {/* Preset Quick Switcher */}
+              <select
+                aria-label="Сценарий мультиэкранного холста"
+                title="Выбрать готовый набор экранов"
+                onChange={(e) => {
+                  if (e.target.value) handleApplyPreset(e.target.value);
+                }}
+                defaultValue=""
+                className={`h-7 text-[11px] font-medium px-2 rounded-md border cursor-pointer ${
+                  isDark
+                    ? 'bg-[#18181C] border-[#27272A] text-zinc-300'
+                    : 'bg-white border-zinc-300 text-zinc-800'
+                }`}
+              >
+                <option value="" disabled>
+                  Пресет...
+                </option>
+                {WORKSPACE_PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
 
-                <span className="text-[11px] font-mono font-bold opacity-60">20%</span>
+              {/* Bezel Toggle (Icon-only) */}
+              <button
+                type="button"
+                onClick={() => setShowBezel((b) => !b)}
+                title={showBezel ? 'Скрыть рамку корпуса телефона' : 'Показать рамку корпуса телефона'}
+                aria-label="Переключить рамку корпуса"
+                className={`h-7 w-7 rounded-md border flex items-center justify-center cursor-pointer transition-colors ${
+                  !showBezel
+                    ? isDark
+                      ? 'bg-zinc-100 text-zinc-950 border-zinc-100'
+                      : 'bg-zinc-900 text-white border-zinc-900'
+                    : isDark
+                    ? 'bg-[#18181C] border-[#27272A] text-zinc-400 hover:text-zinc-100'
+                    : 'bg-white border-zinc-300 text-zinc-600 hover:text-zinc-900'
+                }`}
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+              </button>
 
-                <button
-                  onClick={() => setZoom(1)}
-                  className={`text-[11px] font-bold px-2 py-0.5 rounded-lg transition-colors cursor-pointer ${
-                    zoom === 1
-                      ? 'bg-[#B833FF] text-white'
-                      : isDark
-                      ? 'bg-white/10 text-zinc-300 hover:bg-white/20'
-                      : 'bg-zinc-200 text-zinc-700 hover:bg-zinc-300'
-                  }`}
-                >
-                  100%
-                </button>
+              {/* Safe Area & Box Model Ruler Toggle (Icon-only) */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSafeArea((s) => !s);
+                  setShowBoxModel((b) => !b);
+                }}
+                title="Показать или скрыть зоны Safe Area и отступы Box Model (Alt+B)"
+                aria-label="Safe Area и Box Model"
+                className={`h-7 w-7 rounded-md border flex items-center justify-center cursor-pointer transition-colors ${
+                  showSafeArea
+                    ? isDark
+                      ? 'bg-zinc-100 text-zinc-950 border-zinc-100'
+                      : 'bg-zinc-900 text-white border-zinc-900'
+                    : isDark
+                    ? 'bg-[#18181C] border-[#27272A] text-zinc-400 hover:text-zinc-100'
+                    : 'bg-white border-zinc-300 text-zinc-600 hover:text-zinc-900'
+                }`}
+              >
+                <Ruler className="w-3.5 h-3.5" />
+              </button>
+
+              {/* LAN / Mobile QR Modal (Icon-only) */}
+              <button
+                type="button"
+                onClick={() => setShowTunnelModal(true)}
+                title="Открыть QR-код и ссылки для тестирования на смартфоне"
+                aria-label="Открыть на смартфоне"
+                className={`h-7 w-7 rounded-md border flex items-center justify-center cursor-pointer transition-colors ${
+                  isDark
+                    ? 'bg-[#18181C] border-[#27272A] text-zinc-400 hover:text-zinc-100'
+                    : 'bg-white border-zinc-300 text-zinc-600 hover:text-zinc-900'
+                }`}
+              >
+                <Wifi className="w-3.5 h-3.5" />
+              </button>
+
+              {/* Divider */}
+              <div className={`h-4 w-px mx-0.5 ${isDark ? 'bg-[#26262B]' : 'bg-zinc-200'}`} />
+
+              {/* Fit Zoom + Compact Slider */}
+              <button
+                type="button"
+                onClick={handleFitZoom}
+                title="Вписать экраны по высоте окна (Alt+0)"
+                aria-label="Автомасштаб"
+                className={`h-7 w-7 rounded-md border flex items-center justify-center cursor-pointer ${
+                  isDark
+                    ? 'bg-[#18181C] border-[#27272A] text-zinc-400 hover:text-zinc-100'
+                    : 'bg-white border-zinc-300 text-zinc-600 hover:text-zinc-900'
+                }`}
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+              </button>
+
+              <div
+                title="Масштаб холста предпросмотра"
+                className="hidden lg:flex items-center gap-1.5 px-1"
+              >
+                <input
+                  type="range"
+                  aria-label="Масштаб холста"
+                  min={40}
+                  max={120}
+                  step={5}
+                  value={Math.round(zoom * 100)}
+                  onChange={(e) => setZoom(parseInt(e.target.value, 10) / 100)}
+                  className="w-16 accent-zinc-200 cursor-pointer"
+                />
+                <span className="font-mono text-[11px] tabular-nums text-zinc-400 w-9 text-right">
+                  {Math.round(zoom * 100)}%
+                </span>
               </div>
-            )}
-          </div>
+
+              <button
+                type="button"
+                aria-label="Перезагрузить экраны предпросмотра"
+                title="Перезагрузить все открытые экраны"
+                onClick={() => {
+                  iframesRef.current.forEach((iframe) => {
+                    try {
+                      iframe.src = iframe.src;
+                    } catch {}
+                  });
+                }}
+                className={`h-7 w-7 rounded-md border flex items-center justify-center cursor-pointer ${
+                  isDark
+                    ? 'bg-[#18181C] border-[#27272A] text-zinc-400 hover:text-zinc-100'
+                    : 'bg-white border-zinc-300 text-zinc-600 hover:text-zinc-900'
+                }`}
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
+
+              {/* Divider */}
+              <div className={`h-4 w-px mx-0.5 ${isDark ? 'bg-[#26262B]' : 'bg-zinc-200'}`} />
+
+              {/* DOCK SIDE SWITCHER: LEFT vs RIGHT */}
+              <button
+                type="button"
+                data-testid="dock-position-toggle"
+                onClick={() => setDockPosition((p) => (p === 'left' ? 'right' : 'left'))}
+                title={
+                  dockPosition === 'left'
+                    ? 'Переместить боковую панель вправо от макета'
+                    : 'Переместить боковую панель влево от макета'
+                }
+                aria-label={
+                  dockPosition === 'left'
+                    ? 'Расположить панель справа'
+                    : 'Расположить панель слева'
+                }
+                className={`h-7 px-2 rounded-md border text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors ${
+                  isDark
+                    ? 'bg-[#18181C] border-[#27272A] text-zinc-300 hover:bg-zinc-800'
+                    : 'bg-white border-zinc-300 text-zinc-700 hover:bg-zinc-100'
+                }`}
+              >
+                {dockPosition === 'left' ? (
+                  <PanelRight className="w-3.5 h-3.5" />
+                ) : (
+                  <PanelLeft className="w-3.5 h-3.5" />
+                )}
+                <span className="hidden xl:inline">
+                  {dockPosition === 'left' ? 'Вправо' : 'Влево'}
+                </span>
+              </button>
+
+              {/* Theme Toggle Icon (Sun / Moon) */}
+              <button
+                type="button"
+                data-testid="header-theme-toggle"
+                onClick={() => setThemeKey(isDark ? 'daylight' : 'obsidian')}
+                title={isDark ? 'Переключить на светлую тему (Alt+T)' : 'Переключить на тёмную тему (Alt+T)'}
+                aria-label="Переключить тему оформления"
+                className={`h-7 w-7 rounded-md border flex items-center justify-center cursor-pointer transition-colors ${
+                  isDark
+                    ? 'bg-[#18181C] border-[#27272A] text-zinc-300 hover:text-white hover:bg-zinc-800'
+                    : 'bg-white border-zinc-300 text-zinc-700 hover:text-zinc-950 hover:bg-zinc-100'
+                }`}
+              >
+                {isDark ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+              </button>
+
+          {/* Command Palette Trigger */}
+          <button
+            type="button"
+            onClick={() => setShowCommandPalette(true)}
+            title="Открыть командную палитру (Ctrl+K)"
+            aria-label="Команды (Ctrl+K)"
+            className={`h-7 px-2.5 rounded-md border text-[11px] font-medium flex items-center gap-1.5 cursor-pointer transition-colors ${
+              isDark
+                ? 'bg-[#18181C] border-[#27272A] text-zinc-200 hover:bg-zinc-800'
+                : 'bg-zinc-900 border-zinc-900 text-white hover:bg-zinc-800'
+            }`}
+          >
+            <Command className="w-3 h-3" />
+            <span className="font-mono text-[10px]">⌘K</span>
+          </button>
         </div>
       </header>
 
-      {/* TARGET URL ADDRESS BAR & PRESETS */}
-      <div className={`mb-4 px-3 py-2 rounded-2xl border flex flex-wrap items-center justify-between gap-3 shadow-md transition-colors ${
-        isDark ? 'bg-[#13121F] border-white/10' : 'bg-white border-zinc-200'
-      }`}>
-        <div className="flex items-center gap-2 flex-1 min-w-[280px]">
-          <span className="text-xs font-bold text-zinc-400 pl-1 shrink-0">🌐 URL цели:</span>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              setTargetUrl(inputUrl);
-            }}
-            className="flex items-center gap-1.5 flex-1"
-          >
-            <input
-              type="text"
-              value={inputUrl}
-              onChange={(e) => setInputUrl(e.target.value)}
-              placeholder="Введите URL (например: /demo или http://localhost:3000)..."
-              className={`flex-1 px-3 py-1.5 rounded-xl border text-xs font-mono font-medium focus:outline-none focus:ring-1 focus:ring-[#B833FF] transition-all ${
-                isDark ? 'bg-black/50 border-white/10 text-white placeholder:text-zinc-500' : 'bg-zinc-50 border-zinc-300 text-zinc-900 placeholder:text-zinc-400'
-              }`}
-            />
-            <button
-              type="submit"
-              className="px-3 py-1.5 rounded-xl bg-[#B833FF] hover:bg-[#A822F0] text-white text-xs font-bold transition-all cursor-pointer shadow-xs active:scale-95"
-            >
-              Перейти
-            </button>
-          </form>
-        </div>
-
-        {/* Quick URL presets */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <span className="text-[10px] font-bold text-zinc-500 uppercase">Пресеты:</span>
-          {[
-            { label: '⚡ Демо (/demo)', url: '/demo' },
-            { label: ':3000', url: 'http://localhost:3000' },
-            { label: ':3050', url: 'http://localhost:3050' },
-          ].map((p) => (
-            <button
-              key={p.url}
-              type="button"
-              onClick={() => {
-                setInputUrl(p.url);
-                setTargetUrl(p.url);
-              }}
-              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer border ${
-                targetUrl === p.url
-                  ? 'bg-[#B833FF]/20 border-[#B833FF] text-[#D8B4FE]'
-                  : isDark
-                  ? 'bg-white/5 border-white/10 text-zinc-400 hover:text-white'
-                  : 'bg-zinc-100 border-zinc-200 text-zinc-750 hover:bg-zinc-200'
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* WORKSPACE: INSPECTOR PANEL (LEFT) + MULTI-SCREEN PHONES (RIGHT) */}
-      <div className="flex-1 flex flex-row gap-6 items-start justify-center overflow-x-auto p-1">
-        {/* COMPACT & STICKY PANEL (LEFT SIDE) */}
+      {/* MAIN WORKSPACE CONTENT: VIEWPORT-LOCKED WITH INDEPENDENT DOCK SCROLL */}
+      <main className="flex-1 min-h-0 flex overflow-hidden">
         <div
-          className={`w-[290px] sm:w-[320px] shrink-0 rounded-3xl p-4 shadow-xl flex flex-col gap-3 border transition-colors sticky top-4 ${
-            isDark ? 'bg-[#13121F] border-white/10' : 'bg-white border-zinc-200 shadow-zinc-200/50'
-          }`}
-        >
-          {/* HEADER ROW: TITLE + INSPECT POINTER BUTTON (Model select removed as requested) */}
-          <div className={`flex items-center justify-between gap-2 pb-3 border-b ${isDark ? 'border-white/10' : 'border-zinc-200'}`}>
-            <div className="flex items-center gap-2">
-              <span className="text-base">🔍</span>
-              <span className={`text-xs font-black tracking-tight ${isDark ? 'text-zinc-200' : 'text-zinc-800'}`}>
-                Инспектор правок
-              </span>
-            </div>
-
-            {/* Inspect Toggle Button - Mouse pointer icon */}
-            <button
-              onClick={() => setIsInspectMode(!isInspectMode)}
-              className={`w-8 h-8 rounded-xl border flex items-center justify-center transition-all cursor-pointer shrink-0 ${
-                isInspectMode
-                  ? 'bg-[#B833FF] text-white border-[#B833FF] ring-2 ring-[#B833FF]/50 shadow-[0_0_14px_rgba(184,51,255,0.6)] animate-pulse'
-                  : isDark
-                  ? 'bg-[#1C1A2E] border-white/10 text-zinc-300 hover:text-white hover:border-[#B833FF]'
-                  : 'bg-zinc-100 border-zinc-300 text-zinc-700 hover:text-black hover:border-[#B833FF]'
-              }`}
-              title="Выбрать элемент (Alt + I или I)"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="m3 3 7.07 16.97 2.51-7.39 7.39-2.51L3 3z" />
-                <path d="m13 13 6 6" />
-              </svg>
-            </button>
-          </div>
-
-          {/* INSPECTED ELEMENT CARD (ONLY IF SELECTED) */}
-          {selectedElement && (
-            <div
-              className={`border rounded-2xl p-3 space-y-2 transition-all ${
-                isDark
-                  ? 'bg-[#1C1A2E] border-[#B833FF]/40 shadow-[0_4px_16px_rgba(184,51,255,0.15)]'
-                  : 'bg-purple-50/60 border-purple-200 shadow-sm'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="w-2 h-2 rounded-full bg-[#10B981] animate-ping shrink-0" />
-                  <span className={`text-xs font-black font-mono truncate ${isDark ? 'text-[#E9D5FF]' : 'text-purple-700'}`}>
-                    &lt;{selectedElement.tag}&gt;
-                  </span>
-                  <span className="text-[10px] text-zinc-500 font-mono shrink-0">
-                    {selectedElement.rect.width} × {selectedElement.rect.height}px
-                  </span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={handleSelectParent}
-                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold border transition-colors cursor-pointer ${
-                      isDark ? 'bg-white/5 hover:bg-white/10 border-white/10 text-zinc-300' : 'bg-white hover:bg-zinc-100 border-zinc-200 text-zinc-700'
-                    }`}
-                    title="Выбрать родительский элемент (DOM Parent)"
-                  >
-                    ⬆ Род.
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleSelectChild}
-                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold border transition-colors cursor-pointer ${
-                      isDark ? 'bg-white/5 hover:bg-white/10 border-white/10 text-zinc-300' : 'bg-white hover:bg-zinc-100 border-zinc-200 text-zinc-700'
-                    }`}
-                    title="Выбрать первый дочерний элемент (DOM Child)"
-                  >
-                    ⬇ Доч.
-                  </button>
-                  <button
-                    onClick={handleDeselect}
-                    className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-xs px-1.5 py-0.5 rounded cursor-pointer"
-                    title="Снять выбор (Esc)"
-                  >
-                    ✕
-                  </button>
-                </div>
-              </div>
-
-              {/* СЛОИ ПОД КУРСОРОМ / ВЫБОР ЭЛЕМЕНТА ПОД НИМ */}
-              {layers.length > 1 && (
-                <div
-                  className={`p-2.5 rounded-2xl border space-y-2 ${
-                    isDark ? 'bg-black/40 border-[#B833FF]/30' : 'bg-purple-50/70 border-purple-200'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="text-xs">🥞</span>
-                      <span className={`text-[11px] font-black ${isDark ? 'text-white' : 'text-zinc-900'}`}>
-                        Слои в точке ({layers.length}):
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        type="button"
-                        disabled={activeLayerIndex <= 0}
-                        onClick={() => selectElementFromStack(activeLayerIndex - 1)}
-                        className="px-2 py-0.5 rounded-lg text-[10px] font-bold border transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-white/5 border-white/10 hover:bg-white/15 text-white cursor-pointer"
-                        title="Выбрать верхний слой"
-                      >
-                        ⬆ Выше
-                      </button>
-                      <button
-                        type="button"
-                        disabled={activeLayerIndex >= layers.length - 1}
-                        onClick={() => selectElementFromStack(activeLayerIndex + 1)}
-                        className="px-2.5 py-0.5 rounded-lg text-[10px] font-black transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-gradient-to-r from-[#8E2DE2] to-[#B833FF] text-white hover:opacity-90 shadow-sm cursor-pointer flex items-center gap-1"
-                        title="Выбрать элемент под ним (следующий слой вглубь)"
-                      >
-                        <span>⬇ Под ним</span>
-                        <span className="text-[9px] opacity-80">({activeLayerIndex + 2}/{layers.length})</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Список слоёв в точке */}
-                  <div className="flex flex-col gap-1 max-h-36 overflow-y-auto pr-0.5">
-                    {layers.map((layer, idx) => {
-                      const isSelected = idx === activeLayerIndex;
-                      return (
-                        <button
-                          key={idx}
-                          type="button"
-                          onClick={() => selectElementFromStack(idx)}
-                          className={`w-full text-left px-2 py-1.5 rounded-xl text-[10.5px] font-mono flex items-center justify-between gap-1.5 transition-all cursor-pointer ${
-                            isSelected
-                              ? 'bg-[#B833FF] text-white font-black shadow-[0_2px_8px_rgba(184,51,255,0.4)]'
-                              : isDark
-                              ? 'bg-[#151424] hover:bg-white/10 border border-white/5 text-zinc-300 hover:text-white'
-                              : 'bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-800'
-                          }`}
-                        >
-                          <div className="flex items-center gap-1.5 truncate min-w-0">
-                            <span className={`text-[8.5px] px-1.5 py-0.2 rounded font-black shrink-0 ${isSelected ? 'bg-white/20 text-white' : 'bg-black/30 text-zinc-400'}`}>
-                              #{idx + 1}
-                            </span>
-                            <span className="font-bold truncate shrink-0">
-                              &lt;{layer.tag}&gt;
-                            </span>
-                            {layer.componentName && (
-                              <span className={`text-[9.5px] truncate font-sans font-bold px-1 rounded shrink-0 ${isSelected ? 'bg-black/25 text-[#E9D5FF]' : 'text-emerald-400 bg-emerald-500/10'}`}>
-                                {layer.componentName}
-                              </span>
-                            )}
-                            <span className={`truncate text-[9.5px] font-sans ${isSelected ? 'text-white/80' : 'text-zinc-500'}`}>
-                              {layer.textSnippet ? `"${layer.textSnippet}"` : layer.className ? `.${layer.className.split(' ')[0]}` : ''}
-                            </span>
-                          </div>
-                          <span className={`text-[9px] shrink-0 font-sans font-bold ${isSelected ? 'text-white/90' : 'text-zinc-500'}`}>
-                            {idx === 0 ? 'Верхний' : idx === layers.length - 1 ? 'Дно' : 'Под ним'}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/* Управление перекрывающим слоем: скрыть или вернуть */}
-                  <div className="flex items-center justify-between pt-1 border-t border-white/10 text-[9.5px]">
-                    <button
-                      type="button"
-                      onClick={handleToggleHideCurrentElement}
-                      className="px-2 py-1 rounded-lg font-bold border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white transition-colors cursor-pointer flex items-center gap-1"
-                      title="Временно скрыть текущий элемент, чтобы разблокировать доступ к элементам под ним"
-                    >
-                      <span>👁️ Скрыть этот слой</span>
-                    </button>
-
-                    {hiddenCount > 0 && (
-                      <button
-                        type="button"
-                        onClick={handleRestoreHiddenElements}
-                        className="px-2 py-1 rounded-lg font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 transition-colors cursor-pointer flex items-center gap-1"
-                        title="Восстановить все временно скрытые слои"
-                      >
-                        <span>↩️ Вернуть скрытые ({hiddenCount})</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {hiddenCount > 0 && layers.length <= 1 && (
-                <div className="flex items-center justify-between p-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[10px] text-amber-300">
-                  <span>Скрыто слоев: {hiddenCount}</span>
-                  <button
-                    type="button"
-                    onClick={handleRestoreHiddenElements}
-                    className="px-2 py-0.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 font-bold cursor-pointer"
-                  >
-                    ↩️ Вернуть все
-                  </button>
-                </div>
-              )}
-
-              {/* React Component & Source File Location Badge */}
-              {selectedElement.sourceFile && (
-                <div
-                  className={`text-[11px] px-2.5 py-1.5 rounded-xl border font-mono flex items-center justify-between gap-1.5 ${
-                    isDark
-                      ? 'text-emerald-300 bg-emerald-950/40 border-emerald-500/40'
-                      : 'text-emerald-800 bg-emerald-50 border-emerald-300'
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 min-w-0 truncate">
-                    <span className="shrink-0">📁</span>
-                    <span className="font-bold truncate">
-                      {selectedElement.sourceFile}{selectedElement.sourceLine ? `:${selectedElement.sourceLine}` : ''}
-                    </span>
-                  </div>
-                  {selectedElement.componentName && (
-                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[9.5px] font-black bg-emerald-500/20 text-emerald-400">
-                      &lt;{selectedElement.componentName}&gt;
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {selectedElement.textSnippet && (
-                <div
-                  className={`text-[11px] px-2.5 py-1.5 rounded-xl border font-mono line-clamp-2 ${
-                    isDark ? 'text-zinc-300 bg-black/40 border-white/5' : 'text-zinc-700 bg-white border-zinc-200'
-                  }`}
-                >
-                  <span className="opacity-50">Текст: </span>&quot;{selectedElement.textSnippet}&quot;
-                </div>
-              )}
-
-              {selectedElement.className && (
-                <div
-                  className={`text-[10px] px-2.5 py-1.5 rounded-xl border font-mono line-clamp-2 break-all ${
-                    isDark ? 'text-zinc-400 bg-black/40 border-white/5' : 'text-zinc-600 bg-white border-zinc-200'
-                  }`}
-                >
-                  <span className="opacity-50">Классы: </span>{selectedElement.className}
-                </div>
-              )}
-
-              {/* 🎛️ СВОЙСТВА ЭЛЕМЕНТА (ТОЛЬКО ЧИСЛОВОЙ ВВОД, БЕЗ ПОЛЗУНКОВ И ПРЕСЕТОВ) */}
-              <div
-                className={`p-3 rounded-2xl border space-y-3 ${
-                  isDark ? 'bg-black/35 border-white/10' : 'bg-purple-50/50 border-purple-200'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 font-extrabold text-[11px]">
-                    <span className="text-xs">🎛️</span>
-                    <span className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>Свойства элемента</span>
-                  </div>
-                  <span className="text-[9px] font-mono text-[#D8B4FE] bg-[#B833FF]/20 px-1.5 py-0.5 rounded-full font-bold">
-                    Live
-                  </span>
-                </div>
-
-                {/* 1. ПРОЗРАЧНОСТЬ ФОНА (ТОЛЬКО ЗАЛИВКА, НЕ ЗАТРАГИВАЕТ ТЕКСТ И ИКОНКИ) */}
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="font-bold text-zinc-400">Прозрачность фона (заливки):</span>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={5}
-                        value={tunerState.bgOpacity}
-                        onChange={(e) => {
-                          const v = Math.min(100, Math.max(0, parseInt(e.target.value, 10) || 0));
-                          applyTunerStyle({ bgOpacity: v });
-                        }}
-                        className={`w-14 px-2 py-1 text-right font-mono text-xs rounded-lg border font-bold focus:outline-none focus:ring-1 focus:ring-[#B833FF] ${
-                          isDark ? 'bg-black/60 border-white/10 text-white' : 'bg-white border-zinc-200 text-zinc-900'
-                        }`}
-                      />
-                      <span className="text-xs font-mono font-bold text-[#D8B4FE]">%</span>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => applyTunerStyle({ bgOpacity: 0 })}
-                    className={`w-full py-1.5 px-3 rounded-xl border text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                      tunerState.bgOpacity === 0
-                        ? 'bg-[#B833FF] text-white border-[#B833FF] shadow-sm font-black'
-                        : isDark
-                        ? 'bg-white/5 border-white/10 text-zinc-300 hover:text-white hover:bg-white/10'
-                        : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-100'
-                    }`}
-                  >
-                    <span>🚫</span>
-                    <span>Сделать фон прозрачным (0%)</span>
-                  </button>
-                </div>
-
-                {/* 2. ВЫРАВНИВАНИЕ (ВЛЕВО / ПО ЦЕНТРУ / ВПРАВО) */}
-                <div className="space-y-1.5 pt-2 border-t border-white/5">
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="font-bold text-zinc-400">Выравнивание:</span>
-                    <span className="font-mono text-[9px] text-[#D8B4FE] font-bold">
-                      {tunerState.align === 'left' ? 'влево' : tunerState.align === 'center' ? 'по центру' : tunerState.align === 'right' ? 'вправо' : 'по умолчанию'}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => applyTunerStyle({ align: tunerState.align === 'left' ? 'none' : 'left' })}
-                      className={`py-1.5 px-2 rounded-xl border text-[10px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
-                        tunerState.align === 'left'
-                          ? 'bg-[#B833FF] text-white border-[#B833FF] shadow-sm font-black'
-                          : isDark
-                          ? 'bg-white/5 border-white/10 text-zinc-300 hover:text-white hover:bg-white/10'
-                          : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-100'
-                      }`}
-                      title="Выровнять по левому краю"
-                    >
-                      <span>⬅</span>
-                      <span>Влево</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyTunerStyle({ align: tunerState.align === 'center' ? 'none' : 'center' })}
-                      className={`py-1.5 px-2 rounded-xl border text-[10px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
-                        tunerState.align === 'center'
-                          ? 'bg-[#B833FF] text-white border-[#B833FF] shadow-sm font-black'
-                          : isDark
-                          ? 'bg-white/5 border-white/10 text-zinc-300 hover:text-white hover:bg-white/10'
-                          : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-100'
-                      }`}
-                      title="Выровнять по центру"
-                    >
-                      <span>↔</span>
-                      <span>Центр</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyTunerStyle({ align: tunerState.align === 'right' ? 'none' : 'right' })}
-                      className={`py-1.5 px-2 rounded-xl border text-[10px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
-                        tunerState.align === 'right'
-                          ? 'bg-[#B833FF] text-white border-[#B833FF] shadow-sm font-black'
-                          : isDark
-                          ? 'bg-white/5 border-white/10 text-zinc-300 hover:text-white hover:bg-white/10'
-                          : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-100'
-                      }`}
-                      title="Выровнять по правому краю"
-                    >
-                      <span>➡</span>
-                      <span>Вправо</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* 3. ВЫСОТА (ТОЛЬКО ЧИСЛОВОЙ ВВОД + ЕДИНИЦЫ) */}
-                <div className="space-y-1.5 pt-2 border-t border-white/5">
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="font-bold text-zinc-400">Высота:</span>
-                    <div className="flex items-center gap-0.5">
-                      {(['px', '%', 'dvh', 'auto'] as const).map(u => (
-                        <button
-                          key={u}
-                          type="button"
-                          onClick={() => {
-                            if (u === 'auto') applyTunerStyle({ heightUnit: 'auto' });
-                            else if (u === '%') applyTunerStyle({ heightUnit: '%', heightVal: tunerState.heightUnit === '%' ? tunerState.heightVal : 50 });
-                            else if (u === 'dvh') applyTunerStyle({ heightUnit: 'dvh', heightVal: tunerState.heightUnit === 'dvh' ? tunerState.heightVal : 50 });
-                            else applyTunerStyle({ heightUnit: 'px', heightVal: tunerState.heightUnit === 'px' ? tunerState.heightVal : selectedElement.rect.height });
-                          }}
-                          className={`px-1.5 py-0.5 rounded text-[8.5px] font-mono font-bold transition-all cursor-pointer ${
-                            tunerState.heightUnit === u
-                              ? 'bg-[#B833FF] text-white font-black'
-                              : 'bg-white/10 text-zinc-400 hover:text-white'
-                          }`}
-                        >
-                          {u}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  {tunerState.heightUnit !== 'auto' && (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        min={0}
-                        step={1}
-                        value={tunerState.heightVal}
-                        onChange={(e) => applyTunerStyle({ heightVal: parseInt(e.target.value, 10) || 0 })}
-                        className={`w-full px-2.5 py-1 text-right font-mono text-xs rounded-lg border font-bold focus:outline-none focus:ring-1 focus:ring-[#B833FF] ${
-                          isDark ? 'bg-black/60 border-white/10 text-white' : 'bg-white border-zinc-200 text-zinc-900'
-                        }`}
-                      />
-                      <span className="text-xs font-mono font-bold text-[#D8B4FE] shrink-0 w-8">{tunerState.heightUnit}</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* 4. ШИРИНА (ТОЛЬКО ЧИСЛОВОЙ ВВОД + ЕДИНИЦЫ) */}
-                <div className="space-y-1.5 pt-2 border-t border-white/5">
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="font-bold text-zinc-400">Ширина:</span>
-                    <div className="flex items-center gap-0.5">
-                      {(['px', '%', 'auto'] as const).map(u => (
-                        <button
-                          key={u}
-                          type="button"
-                          onClick={() => {
-                            if (u === 'auto') applyTunerStyle({ widthUnit: 'auto' });
-                            else if (u === '%') applyTunerStyle({ widthUnit: '%', widthVal: tunerState.widthUnit === '%' ? tunerState.widthVal : 100 });
-                            else applyTunerStyle({ widthUnit: 'px', widthVal: tunerState.widthUnit === 'px' ? tunerState.widthVal : selectedElement.rect.width });
-                          }}
-                          className={`px-1.5 py-0.5 rounded text-[8.5px] font-mono font-bold transition-all cursor-pointer ${
-                            tunerState.widthUnit === u
-                              ? 'bg-[#B833FF] text-white font-black'
-                              : 'bg-white/10 text-zinc-400 hover:text-white'
-                          }`}
-                        >
-                          {u}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  {tunerState.widthUnit !== 'auto' && (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        min={0}
-                        step={1}
-                        value={tunerState.widthVal}
-                        onChange={(e) => applyTunerStyle({ widthVal: parseInt(e.target.value, 10) || 0 })}
-                        className={`w-full px-2.5 py-1 text-right font-mono text-xs rounded-lg border font-bold focus:outline-none focus:ring-1 focus:ring-[#B833FF] ${
-                          isDark ? 'bg-black/60 border-white/10 text-white' : 'bg-white border-zinc-200 text-zinc-900'
-                        }`}
-                      />
-                      <span className="text-xs font-mono font-bold text-[#D8B4FE] shrink-0 w-8">{tunerState.widthUnit}</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* 5. СКРУГЛЕНИЕ УГЛОВ (ТОЛЬКО ЧИСЛОВОЙ ВВОД В PX) */}
-                <div className="space-y-1.5 pt-2 border-t border-white/5">
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="font-bold text-zinc-400">Скругление углов:</span>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number"
-                        min={0}
-                        step={1}
-                        value={tunerState.radiusVal}
-                        onChange={(e) => applyTunerStyle({ radiusVal: Math.max(0, parseInt(e.target.value, 10) || 0) })}
-                        className={`w-14 px-2 py-1 text-right font-mono text-xs rounded-lg border font-bold focus:outline-none focus:ring-1 focus:ring-[#B833FF] ${
-                          isDark ? 'bg-black/60 border-white/10 text-white' : 'bg-white border-zinc-200 text-zinc-900'
-                        }`}
-                      />
-                      <span className="text-xs font-mono font-bold text-[#D8B4FE]">px</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Quick Live Tailwind Override (Edit classes live in simulator) */}
-              <div className="pt-1 border-t border-white/10 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-zinc-400">⚡ ЖИВОЙ СТИЛЬ:</span>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => handleApplyLiveStyle((liveClasses + ' bg-transparent').trim())}
-                      className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#B833FF]/20 text-[#D8B4FE] hover:bg-[#B833FF]/30 transition-colors cursor-pointer"
-                    >
-                      +bg-none
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleApplyLiveStyle((liveClasses + ' rounded-2xl').trim())}
-                      className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-white/10 text-zinc-300 hover:bg-white/20 transition-colors cursor-pointer"
-                    >
-                      +rounded
-                    </button>
-                  </div>
-                </div>
-                <input
-                  type="text"
-                  value={liveClasses}
-                  onChange={(e) => handleApplyLiveStyle(e.target.value)}
-                  placeholder="Добавь или измени Tailwind классы..."
-                  className={`w-full px-2.5 py-1.5 text-[10.5px] font-mono rounded-xl border focus:outline-none transition-colors ${
-                    isDark
-                      ? 'bg-black/50 border-white/10 text-white focus:border-[#B833FF]'
-                      : 'bg-white border-zinc-200 text-slate-900 focus:border-[#B833FF]'
-                  }`}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* NOTE INPUT */}
-          <div className="space-y-1">
-            <label
-              className={`text-[10px] font-bold uppercase tracking-wider ${
-                isDark ? 'text-zinc-400' : 'text-zinc-500'
-              }`}
-            >
-              Что нужно изменить:
-            </label>
-            <textarea
-              rows={4}
-              value={noteText}
-              onChange={e => setNoteText(e.target.value)}
-              placeholder="Опишите, что изменить..."
-              className={`w-full border rounded-xl p-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#B833FF] resize-none font-sans transition-colors ${
-                isDark
-                  ? 'bg-[#0D0C15] border-white/10 text-zinc-200 placeholder:text-zinc-600'
-                  : 'bg-zinc-50 border-zinc-200 text-zinc-900 placeholder:text-zinc-400'
-              }`}
-            />
-          </div>
-
-          {/* COPY PROMPT BUTTON */}
-          <button
-            onClick={handleCopyPrompt}
-            className="w-full py-3 rounded-xl bg-gradient-to-r from-[#8E2DE2] to-[#B833FF] hover:opacity-95 text-white text-xs font-black uppercase tracking-wider shadow-[0_8px_20px_rgba(184,51,255,0.4)] flex items-center justify-center gap-2 transition-all cursor-pointer active:scale-[0.98]"
-          >
-            <span>📋 Скопировать</span>
-          </button>
-
-          {copied && (
-            <div className="text-center text-xs font-bold text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 py-1.5 rounded-xl">
-              ✓ Скопировано! Вставьте в чат (Ctrl + V)
-            </div>
-          )}
-        </div>
-
-        {/* PHONES ROW: RENDER ALL ACTIVE SLOTS SIDE-BY-SIDE */}
-        <div
-          style={{ transform: `scale(${zoom})`, transformOrigin: 'top center' }}
-          className="flex flex-row gap-8 items-start justify-center transition-transform duration-150 shrink-0"
-        >
-          {slots.map((slot) => {
-            const spec = PREVIEW_DEVICES[slot.deviceKey] || PREVIEW_DEVICES.iphone16pro;
-            return (
-              <PhoneSlot
-                key={slot.id}
-                id={slot.id}
-                device={spec}
-                rotated={slot.rotated}
-                showBezel={showBezel}
-                canRemove={slots.length > 1}
-                hapticTriggered={hapticTriggered}
-                allDevices={PREVIEW_DEVICES}
-                iframeRef={(el) => {
-                  if (el) iframesRef.current.set(slot.id, el);
-                  else iframesRef.current.delete(slot.id);
-                }}
-                onRotate={() => handleRotateSlot(slot.id)}
-                onChangeDevice={(newKey) => handleChangeSlotDevice(slot.id, newKey)}
-                onRemove={() => handleRemoveSlot(slot.id)}
-                onScreenshot={() => handleScreenshot(slot.id)}
-                isDark={isDark}
-                iframeSrc={targetUrl}
-              />
-            );
-          })}
-        </div>
-      </div>
-
-      {/* MODAL 1: QR CODE & MOBILE TUNNEL */}
-      {showQrModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div
-            className={`w-full max-w-md rounded-3xl p-6 border shadow-2xl space-y-4 ${
-              isDark ? 'bg-[#151424] border-white/10 text-white' : 'bg-white border-zinc-200 text-zinc-900'
+          data-dock-side={dockPosition}
+            className={`flex-1 min-h-0 flex w-full overflow-hidden ${
+              dockPosition === 'right' ? 'flex-row-reverse' : 'flex-row'
             }`}
           >
-            <div className="flex items-center justify-between border-b pb-3 border-white/10">
-              <div className="flex items-center gap-2">
-                <span className="text-xl">📲</span>
-                <h3 className="font-extrabold text-sm">Тестирование на реальном смартфоне</h3>
-              </div>
-              <button
-                onClick={() => setShowQrModal(false)}
-                className="text-zinc-400 hover:text-white text-base px-2 py-1 rounded-lg cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <p className="text-xs text-zinc-400 leading-relaxed">
-              Отсканируйте QR-код камерой iPhone или Android, чтобы открыть приложение прямо в мобильном Safari/Chrome или Telegram с живым Hot Reload:
-            </p>
-
-            {/* QR CODE CARDS (WI-FI PRIMARY + TELEGRAM HTTPS) */}
-            <div className="grid grid-cols-2 gap-3 text-center">
-              {/* Local Wi-Fi (Primary - 100% Reliable without Cloudflare Error 1033) */}
-              <div className="p-3 rounded-2xl bg-black/40 border border-[#B833FF]/30 flex flex-col items-center gap-2 relative">
-                <span className="absolute -top-2.5 bg-[#B833FF] text-white text-[9px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider">
-                  Рекомендуется
-                </span>
-                <span className="text-[11px] font-bold text-white flex items-center gap-1 mt-1">
-                  <span>📶 Локальный Wi-Fi</span>
-                </span>
-                {wifiQr ? (
-                  <img src={wifiQr} alt="WiFi QR" className="w-36 h-36 rounded-xl bg-white p-1.5 shadow-md" />
-                ) : (
-                  <div className="w-36 h-36 rounded-xl bg-black/40 border border-white/5 flex items-center justify-center text-zinc-400 text-xs">
-                    Генерация...
-                  </div>
-                )}
-                <span className="text-[10px] text-zinc-300 font-mono font-bold">
-                  {localWifiUrl}
-                </span>
-                <span className="text-[9px] text-zinc-500">
-                  Safari / Chrome на iPhone (в одной сети)
-                </span>
-              </div>
-
-              {/* Public HTTPS (Production or Localtunnel) */}
-              <div className="p-3 rounded-2xl bg-black/30 border border-white/10 flex flex-col items-center gap-2">
-                <span className="text-[11px] font-bold text-[#E9D5FF] flex items-center gap-1">
-                  <span>🌐 Telegram HTTPS</span>
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                </span>
-                {tunnelQr ? (
-                  <img src={tunnelQr} alt="Tunnel QR" className="w-36 h-36 rounded-xl bg-white p-1.5 shadow-md" />
-                ) : tunnelLoading ? (
-                  <div className="w-36 h-36 rounded-xl bg-black/40 border border-white/5 flex flex-col items-center justify-center gap-2 text-zinc-400 text-xs">
-                    <span className="w-5 h-5 border-2 border-[#B833FF] border-t-transparent rounded-full animate-spin" />
-                    <span>Подключение...</span>
-                  </div>
-                ) : (
-                  <div className="w-36 h-36 rounded-xl bg-black/40 border border-white/5 flex items-center justify-center text-zinc-400 text-xs">
-                    Ожидание...
-                  </div>
-                )}
-                <span className="text-[9px] text-zinc-400 font-mono truncate max-w-[140px]">
-                  {tunnelUrl || 'https://kitty.wowpn.com'}
-                </span>
-                <span className="text-[9px] text-zinc-500">
-                  Для официального клиента Telegram
-                </span>
-              </div>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(localWifiUrl);
-                  alert('Wi-Fi адрес скопирован: ' + localWifiUrl);
-                }}
-                className="flex-1 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-bold text-white transition-colors cursor-pointer"
-              >
-                📋 Копировать Wi-Fi
-              </button>
-              {tunnelUrl && (
-                <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(tunnelUrl);
-                    alert('HTTPS адрес скопирован: ' + tunnelUrl);
-                  }}
-                  className="flex-1 py-2 rounded-xl bg-[#B833FF]/20 hover:bg-[#B833FF]/30 border border-[#B833FF]/40 text-xs font-bold text-[#E9D5FF] transition-colors cursor-pointer"
+            {/* SIDEBAR DOCK: INDEPENDENT VERTICAL SCROLL ON OUTER CONTAINER */}
+            <aside
+              data-testid="workbench-dock"
+              style={{ width: `${dockWidth}px` }}
+              className={`h-full overflow-y-auto shrink-0 p-3 flex flex-col gap-3 select-none ${
+                dockPosition === 'left' ? 'border-r' : 'border-l'
+              } ${currentTheme.surfaceBg} ${currentTheme.borderClass}`}
+            >
+              {/* DOCK HEADER: SECTION TABS (Слои & Инспектор | Очередь | Аудит | Код | Темы) + SIDE TOGGLE */}
+              <div className="flex items-center gap-1.5 shrink-0">
+                <div
+                  className={`flex-1 grid grid-cols-5 gap-0.5 p-0.5 rounded-lg border ${
+                    isDark ? 'bg-[#0E0E11] border-[#27272A]' : 'bg-zinc-100 border-zinc-200'
+                  }`}
                 >
-                  📋 Копировать HTTPS
+                  {[
+                    {
+                      id: 'layers' as const,
+                      label: 'Слои',
+                      title: 'Единый конструктор слоёв и инспектор DOM (Alt+I)',
+                      icon: Layers,
+                    },
+                    {
+                      id: 'queue' as const,
+                      label: 'Очередь',
+                      count: agentQueue.length,
+                      title: `Очередь задач агента (${agentQueue.length})`,
+                      icon: ListTodo,
+                    },
+                    {
+                      id: 'audit' as const,
+                      label: 'Аудит',
+                      count: auditIssues.length,
+                      title: `Проверка вёрстки и Telegram (${auditIssues.length})`,
+                      icon: ShieldCheck,
+                    },
+                    {
+                      id: 'code' as const,
+                      label: 'Код',
+                      title: 'Готовые модули кода и архитектурные чертежи',
+                      icon: Code2,
+                    },
+                    {
+                      id: 'settings' as const,
+                      label: 'Темы',
+                      title: 'Темы оформления и горячие клавиши',
+                      icon: Settings,
+                    },
+                  ].map((tab) => {
+                    const isActive = dockTab === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        data-testid={`dock-tab-${tab.id}`}
+                        title={tab.title}
+                        onClick={() => {
+                          setDockTab(tab.id);
+                          if (tab.id === 'audit') setTimeout(handleRunLayoutAudit, 80);
+                        }}
+                        className={`h-7 px-1 rounded-md text-[11px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors whitespace-nowrap ${
+                          isActive
+                            ? isDark
+                              ? 'bg-zinc-200 text-zinc-950 font-semibold shadow-xs'
+                              : 'bg-white text-zinc-950 font-semibold shadow-xs'
+                            : isDark
+                            ? 'text-zinc-400 hover:text-zinc-100'
+                            : 'text-zinc-600 hover:text-zinc-900'
+                        }`}
+                      >
+                        <tab.icon className="w-3.5 h-3.5 shrink-0" />
+                        <span className="hidden sm:inline">{tab.label}</span>
+                        {tab.count !== undefined && tab.count > 0 && (
+                          <span className="text-[9px] font-mono opacity-70 tabular-nums">
+                            {tab.count}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setDockPosition((p) => (p === 'left' ? 'right' : 'left'))}
+                  title={
+                    dockPosition === 'left'
+                      ? 'Перенести панель на правую сторону экрана'
+                      : 'Перенести панель на левую сторону экрана'
+                  }
+                  aria-label="Сменить сторону панели"
+                  className={`h-8 w-8 rounded-lg border flex items-center justify-center shrink-0 cursor-pointer transition-colors ${
+                    isDark
+                      ? 'bg-[#0E0E11] border-[#27272A] text-zinc-400 hover:text-zinc-100'
+                      : 'bg-zinc-100 border-zinc-200 text-zinc-600 hover:text-zinc-900'
+                  }`}
+                >
+                  {dockPosition === 'left' ? (
+                    <PanelRight className="w-3.5 h-3.5" />
+                  ) : (
+                    <PanelLeft className="w-3.5 h-3.5" />
+                  )}
                 </button>
+              </div>
+
+              {dockTab === 'layers' && (
+                <LayerBuilderDock
+                  layers={designLayers}
+                  activeLayerId={activeBuilderLayerId}
+                  checkedLayerIds={checkedLayerIds}
+                  snapGridSize={snapGridSize}
+                  operations={builderOps}
+                  isDark={isDark}
+                  enqueuedSuccess={builderEnqueuedToast}
+                  slotCount={slots.length}
+                  liveMultiScreenSync={liveMultiScreenSync}
+                  canvasEyedropperTarget={canvasEyedropperTarget}
+                  onToggleCanvasEyedropper={(target) =>
+                    setCanvasEyedropperTarget((prev) => (prev === target ? null : target))
+                  }
+                  onToggleMultiScreenSync={() => setLiveMultiScreenSync((v) => !v)}
+                  onEnableAdaptiveTwoScreens={handleEnableAdaptiveTwoScreens}
+                  onSelectLayer={(id) => {
+                    setActiveBuilderLayerId(id);
+                    const doc = getPrimaryIframeDoc();
+                    if (doc) {
+                      const el = findDomElementByLayerId(doc, id);
+                      if (el) selectDomElement(el, doc);
+                    }
+                  }}
+                  onToggleCheckLayer={(id) =>
+                    setCheckedLayerIds((prev) =>
+                      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+                    )
+                  }
+                  onToggleSnapGrid={() => setSnapGridSize((prev) => (prev > 1 ? 1 : 8))}
+                  onRefreshLayers={() => refreshDesignLayers()}
+                  onTransformLayer={handleBuilderTransformLayer}
+                  onUpdateLayerText={handleBuilderUpdateText}
+                  onUpdateLayerTextColor={handleBuilderUpdateTextColor}
+                  onUpdateLayerBgColor={handleBuilderUpdateBgColor}
+                  onUpdateLayerIcon={handleBuilderUpdateIcon}
+                  onReorderLayer={handleBuilderReorderLayer}
+                  onGroupCheckedLayers={handleBuilderGroupLayers}
+                  onUngroupLayer={handleBuilderUngroupLayer}
+                  onDuplicateLayer={handleBuilderDuplicateLayer}
+                  onToggleVisibility={(id) => {
+                    const docs = getTargetIframeDocs();
+                    docs.forEach((d) => toggleDomLayerVisibility(d, id));
+                    updateHiddenLayersCount();
+                    refreshDesignLayers(id);
+                  }}
+                  onToggleLock={(id) => {
+                    const docs = getTargetIframeDocs();
+                    docs.forEach((d) => toggleDomLayerLock(d, id));
+                    refreshDesignLayers(id);
+                  }}
+                  onResetAll={() => {
+                    const docs = getTargetIframeDocs();
+                    docs.forEach((d) => resetAllDomLayerTransforms(d));
+                    setBuilderOps([]);
+                    refreshDesignLayers();
+                  }}
+                  onEnqueueBuilderChanges={handleEnqueueBuilderLayer}
+                  isInspectMode={isInspectMode}
+                  onToggleInspectMode={() => setIsInspectMode((prev) => !prev)}
+                  onQuickSelectComponent={handleQuickSelectComponent}
+                  selectedElement={selectedElement}
+                  onNavigateParent={() => handleNavigateHierarchy('parent')}
+                  onNavigateChild={() => handleNavigateHierarchy('child')}
+                  onToggleHideCurrentLayer={handleToggleHideLayer}
+                  hiddenLayersCount={hiddenCount}
+                  onRestoreHiddenLayers={handleRestoreHiddenLayers}
+                  selectedDirectiveId={selectedDirectiveId}
+                  onChangeDirectiveId={setSelectedDirectiveId}
+                  noteText={noteText}
+                  onChangeNoteText={setNoteText}
+                  onCopySinglePrompt={handleCopySingleElementPrompt}
+                  copiedSingle={copiedSingle}
+                />
               )}
+              {dockTab === 'queue' && (
+                <div className="overflow-y-auto">
+                  <AgentQueueView
+                    queue={agentQueue}
+                    isDark={isDark}
+                    workspaceMeta={workspaceMeta}
+                    onUpdateItem={(id, patch) =>
+                      setAgentQueue((prev) =>
+                        prev.map((item) => (item.id === id ? { ...item, ...patch } : item))
+                      )
+                    }
+                    onRemoveItem={(id) => setAgentQueue((prev) => prev.filter((item) => item.id !== id))}
+                    onClearQueue={() => setAgentQueue([])}
+                    onAddSampleTask={() => {
+                      const nextPin = agentQueue.length + 1;
+                      setAgentQueue((prev) => [
+                        ...prev,
+                        {
+                          id: `sample-${Date.now()}`,
+                          pinNumber: nextPin,
+                          createdAt: new Date().toLocaleTimeString('ru-RU'),
+                          slotDeviceName: 'Galaxy S24 Ultra',
+                          priority: 'high',
+                          directiveId: 'safe-area',
+                          note: 'Увеличить нижний отступ навигации с учётом Safe Area на Android и iOS',
+                          element: {
+                            tag: 'nav',
+                            className: 'fixed bottom-0 inset-x-0 h-16 bg-[#151421]/95',
+                            textSnippet: 'Лента · Витрина · Создать · Профиль',
+                            rect: { top: 788, left: 0, width: 393, height: 64 },
+                            selector: 'div > nav.fixed.bottom-0',
+                            componentName: 'BottomTabNav',
+                            sourceFile: 'components/demo/DemoApp.tsx',
+                            sourceLine: 500,
+                          },
+                          diffs: [
+                            {
+                              property: 'Высота',
+                              before: '64px',
+                              after: '76px',
+                              tailwindSuggestion: 'h-[76px] pb-safe',
+                            },
+                          ],
+                        },
+                      ]);
+                    }}
+                  />
+                </div>
+              )}
+
+              {dockTab === 'audit' && (
+                <div className="overflow-y-auto">
+                  <LayoutAuditView
+                    issues={auditIssues}
+                    isDark={isDark}
+                    tgEnv={tgEnv}
+                    hapticLogs={hapticLogs}
+                    onUpdateTgEnv={updateTgEnv}
+                    onRunAudit={handleRunLayoutAudit}
+                    onEnqueueIssue={(issue) => {
+                      const nextPin =
+                        agentQueue.length > 0 ? Math.max(...agentQueue.map((i) => i.pinNumber)) + 1 : 1;
+                      setAgentQueue((prev) => [
+                        ...prev,
+                        {
+                          id: `audit-task-${Date.now()}`,
+                          pinNumber: nextPin,
+                          createdAt: new Date().toLocaleTimeString('ru-RU'),
+                          slotDeviceName: 'Layout Linter',
+                          priority: issue.severity === 'error' ? 'high' : 'normal',
+                          directiveId: issue.category === 'overflow-x' ? 'responsive-320' : 'safe-area',
+                          note: `${issue.title}: ${issue.suggestedFix}`,
+                          element: {
+                            tag: 'div',
+                            className: '',
+                            textSnippet: issue.description,
+                            rect: issue.rect,
+                            selector: issue.selector,
+                            componentName: issue.componentName,
+                            sourceFile: issue.sourceFile,
+                            sourceLine: issue.sourceLine,
+                          },
+                          diffs: [],
+                        },
+                      ]);
+                      setDockTab('queue');
+                    }}
+                    onClearHapticLogs={() => setHapticLogs([])}
+                  />
+                </div>
+              )}
+
+              {dockTab === 'code' && (
+                <div className="overflow-y-auto">
+                  <CodeBlueprintView isDark={isDark} />
+                </div>
+              )}
+
+              {dockTab === 'settings' && (
+                <div className="overflow-y-auto">
+                  <HotkeysThemeView
+                    activeThemeKey={themeKey}
+                    onSelectTheme={setThemeKey}
+                    hotkeys={hotkeys}
+                    onUpdateHotkey={(id, newCombo) =>
+                      setHotkeys((prev) =>
+                        prev.map((h) => (h.id === id ? { ...h, combo: newCombo } : h))
+                      )
+                    }
+                    onResetHotkeys={() => setHotkeys(DEFAULT_HOTKEYS)}
+                    onApplyPreset={handleApplyPreset}
+                    isDark={isDark}
+                  />
+                </div>
+              )}
+            </aside>
+
+            {/* INTERACTIVE DOCK WIDTH RESIZE SPLITTER */}
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Изменить ширину боковой панели"
+              data-testid="dock-resize-handle"
+              title="Тяните влево или вправо для изменения ширины панели (двойной клик — сброс 350px)"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setIsResizingDock(true);
+              }}
+              onDoubleClick={() => setDockWidth(350)}
+              className={`w-1.5 h-full shrink-0 cursor-col-resize flex items-center justify-center group transition-colors ${
+                isResizingDock
+                  ? 'bg-zinc-400'
+                  : isDark
+                  ? 'bg-transparent hover:bg-zinc-700/70'
+                  : 'bg-transparent hover:bg-zinc-300'
+              }`}
+            >
+              <div
+                className={`w-0.5 h-10 rounded-full transition-colors ${
+                  isResizingDock
+                    ? 'bg-white'
+                    : 'bg-zinc-600/40 group-hover:bg-zinc-300'
+                }`}
+              />
+            </div>
+
+            {/* PHONE MOCKUP CANVAS: FIXED IN VIEWPORT, NEVER SCROLLS WHEN DOCK SCROLLS */}
+            <div
+              ref={canvasContainerRef}
+              className={`flex-1 min-w-0 h-full overflow-auto flex items-start justify-center p-4 ${
+                isResizingDock ? 'pointer-events-none select-none' : ''
+              }`}
+            >
+              <div
+                style={{ transform: `scale(${zoom})`, transformOrigin: 'top center' }}
+                className="flex flex-row gap-8 items-start justify-center transition-transform duration-150 shrink-0"
+              >
+                {slots.map((slot) => {
+                  const spec = PREVIEW_DEVICES[slot.deviceKey] || PREVIEW_DEVICES.iphone16pro;
+                  return (
+                    <PhoneSlot
+                      key={slot.id}
+                      id={slot.id}
+                      device={spec}
+                      rotated={slot.rotated}
+                      showBezel={showBezel}
+                      showSafeArea={showSafeArea}
+                      canRemove={slots.length > 1}
+                      hapticTriggered={hapticTriggered}
+                      allDevices={PREVIEW_DEVICES}
+                      pins={agentQueue}
+                      iframeRef={(el) => handleIframeRef(slot.id, el)}
+                      onIframeLoad={() => refreshDesignLayers()}
+                      onRotate={() =>
+                        setSlots((prev) =>
+                          prev.map((s) => (s.id === slot.id ? { ...s, rotated: !s.rotated } : s))
+                        )
+                      }
+                      onChangeDevice={(newKey) =>
+                        setSlots((prev) =>
+                          prev.map((s) => (s.id === slot.id ? { ...s, deviceKey: newKey } : s))
+                        )
+                      }
+                      onRemove={() => setSlots((prev) => prev.filter((s) => s.id !== slot.id))}
+                      onCaptureScreenshot={handleCaptureSlotScreenshot}
+                      onSelectPin={() => setDockTab('queue')}
+                      isDark={isDark}
+                      iframeSrc={targetUrl}
+                      canvasEyedropperActive={Boolean(canvasEyedropperTarget)}
+                      hoveredEyedropperHex={hoveredEyedropperHex}
+                      onCancelEyedropper={() => setCanvasEyedropperTarget(null)}
+                    />
+                  );
+                })}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+      </main>
+
+      {/* MODALS: COMMAND PALETTE (Ctrl+K), MOBILE TUNNEL & VISUAL-TECHNICAL SCREENSHOT */}
+      <TechnicalScreenshotModal
+        screenshot={latestScreenshot}
+        isDark={isDark}
+        onClose={() => setLatestScreenshot(null)}
+        onEnqueueScreenshot={handleEnqueueScreenshot}
+      />
+
+      <CommandPaletteModal
+        open={showCommandPalette}
+        onClose={() => setShowCommandPalette(false)}
+        isDark={isDark}
+        onToggleInspect={() => {
+          setActiveSection('canvas');
+          setIsInspectMode((prev) => !prev);
+        }}
+        onFitZoom={handleFitZoom}
+        onToggleBoxModel={() => {
+          setShowBoxModel((b) => !b);
+          setShowSafeArea((s) => !s);
+        }}
+        onCopyBatchPrompt={() => {
+          const md = buildConsolidatedAgentPrompt(agentQueue, workspaceMeta);
+          navigator.clipboard.writeText(md);
+        }}
+        onRunAudit={() => {
+          setActiveSection('audit');
+          setTimeout(handleRunLayoutAudit, 80);
+        }}
+        onSelectPreset={handleApplyPreset}
+        onSelectTheme={setThemeKey}
+      />
+
+      <MobileTunnelModal
+        open={showTunnelModal}
+        onClose={() => setShowTunnelModal(false)}
+        isDark={isDark}
+        localWifiUrl={lanInfo.localWifiUrl}
+        publicAppUrl={lanInfo.publicAppUrl}
+      />
     </div>
   );
 }

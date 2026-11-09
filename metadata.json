@@ -1,0 +1,6 @@
+{
+  "name": "Viewer Antigravity 2.0 Workbench",
+  "description": "Инженерная станция мультиэкранного предпросмотра, Z-Index инспекции DOM и пакетной интеграции с ИИ-агентом Antigravity для Telegram Mini Apps и мобильных веб-приложений.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

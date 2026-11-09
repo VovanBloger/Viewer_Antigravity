@@ -135,19 +135,36 @@ npm run dev
 ```
 viewer_antigravity/
 ├── app/
+│   ├── api/
+│   │   └── antigravity-bridge/   # Local Bridge API для синхронизации с Antigravity IDE
 │   ├── demo/
 │   │   └── page.tsx              # Встроенное адаптивное демо-приложение
 │   ├── globals.css               # Tailwind CSS v4 и кастомные неоновые стили
 │   ├── layout.tsx                # Корневой лэйаут с метаданными
-│   └── page.tsx                  # Главный воркспейс студии препросмотра
+│   └── page.tsx                  # Главный воркспейс студии препросмотра 2.0
 ├── components/
 │   ├── demo/
 │   │   └── DemoApp.tsx           # Интерактивный компонент витрины и ленты
-│   └── preview/
-│       └── PhoneSlot.tsx         # Физический корпус смартфона и фрейм
+│   ├── preview/
+│   │   └── PhoneSlot.tsx         # Физический корпус смартфона и фрейм
+│   └── workbench/
+│       ├── AgentQueueView.tsx    # Пакетная очередь правок для ИИ-агента
+│       ├── CodeBlueprintView.tsx # Архитектурные блюпринты и модули
+│       ├── ColorPickerField.tsx  # Визуальный выбор цвета с пипеткой
+│       ├── CommandPaletteModal.tsx # Палитра команд и QR-код для Wi-Fi
+│       ├── HotkeysThemeView.tsx  # Настройка горячих клавиш и тем IDE
+│       ├── LayerBuilderDock.tsx  # Дерево слоёв и визуальный тюнер
+│       ├── LayoutAuditView.tsx   # Линтер мобильной вёрстки и Telegram Safe Area
+│       └── TechnicalScreenshotModal.tsx # Визуально-технические скриншоты
 ├── lib/
-│   ├── haptics.ts                # Тактильный отклик и AudioContext синтез
-│   └── preview-devices.ts        # Спецификации устройств (iPhone, Pixel, iPad)
+│   ├── antigravity-core.ts       # Вычисление диффов, промпты и аудит
+│   ├── dom-inspector.ts          # rAF-инспектор DOM, Fiber-метаданные и Box Model
+│   ├── dom-layer-engine.ts       # 8-точечный интерактивный Gizmo и манипуляции DOM
+│   ├── haptics.ts                # Синглтон Web Audio Haptics и отклик
+│   ├── layer-builder.ts          # Движок адаптивных трансформаций слоёв
+│   ├── preview-devices.ts        # Спецификации устройств (iPhone, Pixel, iPad)
+│   ├── screenshot-engine.ts      # Canvas-генератор скриншотов с разметкой
+│   └── utils.ts                  # Утилиты классов cn()
 ├── docs/
 │   └── assets/                   # Графика и баннеры для документации
 ├── public/                       # Статические ассеты и иконки
