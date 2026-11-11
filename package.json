@@ -12,6 +12,7 @@
     "agents:mcp": "tsx runtime/mcp/server.ts",
     "agents:wait": "tsx runtime/cli/wait-task.ts",
     "agents:task": "tsx runtime/cli/task.ts",
+    "agents:swarm": "tsx runtime/cli/swarm.ts",
     "browser:mcp": "tsx runtime/browser/mcp.ts",
     "viewer:dev": "next dev -H 127.0.0.1 -p 3100",
     "devbot:start": "tsx integrations/devbot/index.ts",
