@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "counter",
+  "projectId": "counter",
+  "network": "test",
+  "botId": "counter-test-bot",
+  "mode": "fixture",
+  "command": {
+    "executable": "$NODE",
+    "args": ["--import", "tsx", "${WORKTREE}/examples/counter/cli.ts", "--fixture-chat=101"]
+  },
+  "readinessPath": "/health"
+}

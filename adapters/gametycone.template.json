@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "gametycone",
+  "projectId": "game",
+  "network": "test",
+  "botId": "game-isolated-test-bot",
+  "mode": "template",
+  "blockedReasons": [
+    "Observed package vpn-empire-tma: npm dev binds Vite to 0.0.0.0:3000; vite.config.ts fixes port 3000 with strictPort.",
+    "Observed vite.config.ts proxies /api and /tonconnect-manifest.json to localhost:8080.",
+    "An explicit adapter for allocated frontend/backend ports, isolated database and dedicated bot is required before any launch.",
+    "Application credentials and production configuration were not inspected. No live start is authorized by this template."
+  ]
+}
