@@ -43,7 +43,7 @@ export interface LegacyImportResult {
   /** Сколько проектов зарегистрировано (или обновлено) из projectsFile. */
   projects: number;
   imported: number;
-  /** Пропущено: PENDING_CONFIRMATION, уже импортированные ранее и записи без id / с неизвестным статусом. */
+  /** Пропущено: уже импортированные ранее и записи без id / с неизвестным статусом. */
   skipped: number;
   /** Не импортированные команды с незарегистрированным проектом, в виде "CMD-001 (projectId)". */
   unknownProject: string[];
@@ -51,7 +51,9 @@ export interface LegacyImportResult {
 
 const STATUS_MAP: Record<string, TaskStatus> = {
   QUEUED: "QUEUED",
-  IN_PROGRESS: "QUEUED",
+  // Unknown executor state must never cause an automatic second execution.
+  IN_PROGRESS: "FAILED",
+  PENDING_CONFIRMATION: "CANCELLED",
   COMPLETED: "APPROVED",
   FAILED: "FAILED",
   CANCELLED: "CANCELLED",
@@ -168,7 +170,12 @@ export function importLegacyQueue(store: SqliteTaskStore, options: LegacyImportO
 
     const eventData: Record<string, unknown> = { legacyStatus };
     if (legacyStatus === "IN_PROGRESS") {
-      eventData.note = "В старой очереди задание выполнялось; прежний исполнитель неизвестен — возвращено в QUEUED";
+      task.failure = { code: "LEGACY_EXECUTOR_UNKNOWN", reason: "Задание выполнялось в старой очереди. Проверьте результат прежнего исполнителя перед явной повторной постановкой." };
+      eventData.note = "Прежний исполнитель неизвестен; повторное выполнение автоматически запрещено";
+    }
+    if (legacyStatus === "PENDING_CONFIRMATION") {
+      task.meta = { ...task.meta, legacyConfirmationRequired: true };
+      eventData.note = "Сохранено для истории без выполнения; прежнее неподтверждённое действие требует новой явной постановки и подтверждения";
     }
     store.importTask(task, eventData);
     result.imported += 1;

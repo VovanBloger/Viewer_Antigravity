@@ -84,7 +84,7 @@ test("импорт старой очереди: статусы, поля, иде
   const store = openStore({ dbPath: path.join(dir, "queue.db") });
   try {
     const first = importLegacyQueue(store, { queueFile, projectsFile });
-    assert.deepEqual(first, { projects: 2, imported: 5, skipped: 1, unknownProject: ["CMD-006 (ghost)"] });
+    assert.deepEqual(first, { projects: 2, imported: 6, skipped: 0, unknownProject: ["CMD-006 (ghost)"] });
 
     // проекты: конфликтующий алиас не ломает импорт
     assert.equal(store.getProject("срм")?.id, "crm");
@@ -110,7 +110,8 @@ test("импорт старой очереди: статусы, поля, иде
 
     const wasRunning = store.getByLegacyId("CMD-002");
     assert.ok(wasRunning);
-    assert.equal(wasRunning.status, "QUEUED");
+    assert.equal(wasRunning.status, "FAILED");
+    assert.equal(wasRunning.failure?.code, "LEGACY_EXECUTOR_UNKNOWN");
     assert.equal(wasRunning.owner, undefined);
     const imported = store.events(wasRunning.id);
     assert.equal(imported.length, 1);
@@ -130,7 +131,9 @@ test("импорт старой очереди: статусы, поля, иде
 
     assert.equal(store.getByLegacyId("CMD-005")?.status, "CANCELLED");
     assert.equal(store.getByLegacyId("CMD-006"), undefined);
-    assert.equal(store.getByLegacyId("CMD-007"), undefined);
+    assert.equal(store.getByLegacyId("CMD-007")?.status, "CANCELLED");
+    assert.equal(store.getByLegacyId("CMD-007")?.goal, "rm -rf");
+    assert.equal(store.getByLegacyId("CMD-007")?.meta?.legacyConfirmationRequired, true);
 
     // исторические задания не порождают уведомлений
     assert.deepEqual(store.pendingNotifications(), []);
@@ -138,13 +141,13 @@ test("импорт старой очереди: статусы, поля, иде
     // старые задания выдаются в порядке возраста
     const claimed = store.claimNext({ projectId: "crm", executorId: "antigravity", owner: "s1" });
     assert.equal(claimed?.legacyId, "CMD-001");
-    assert.equal(store.claimNext({ projectId: "crm", executorId: "antigravity", owner: "s1" })?.legacyId, "CMD-002");
+    assert.equal(store.claimNext({ projectId: "crm", executorId: "antigravity", owner: "s1" }), null);
 
     const second = importLegacyQueue(store, { queueFile, projectsFile });
     assert.equal(second.imported, 0);
     assert.equal(second.skipped, 6);
     assert.deepEqual(second.unknownProject, ["CMD-006 (ghost)"]);
-    assert.equal(store.list().length, 5);
+    assert.equal(store.list().length, 6);
 
     assert.equal(fs.readFileSync(queueFile, "utf-8"), before.q);
     assert.equal(fs.readFileSync(projectsFile, "utf-8"), before.p);
@@ -161,8 +164,8 @@ test("без projectsFile проекты не регистрируются и н
     const result = importLegacyQueue(store, { queueFile });
     assert.equal(result.projects, 0);
     assert.equal(result.imported, 0);
-    assert.equal(result.skipped, 1);
-    assert.equal(result.unknownProject.length, 6);
+    assert.equal(result.skipped, 0);
+    assert.equal(result.unknownProject.length, 7);
     assert.equal(store.list().length, 0);
   } finally {
     store.close();
