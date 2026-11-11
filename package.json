@@ -7,10 +7,14 @@
     "build": "next build",
     "start": "next start -p 3100",
     "lint": "eslint .",
-    "test": "node --test --import tsx lib/antigravity-core.test.ts",
-    "clean": "next clean"
+    "test": "node --test --import tsx lib/antigravity-core.test.ts \"runtime/**/*.test.ts\"",
+    "clean": "next clean",
+    "agents:mcp": "tsx runtime/mcp/server.ts",
+    "agents:wait": "tsx runtime/cli/wait-task.ts",
+    "agents:task": "tsx runtime/cli/task.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/qrcode": "^1.5.6",
     "autoprefixer": "^10.4.21",
     "clsx": "^2.1.1",
@@ -20,11 +24,12 @@
     "qrcode": "^1.5.4",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
-    "tailwind-merge": "^3.3.1"
+    "tailwind-merge": "^3.3.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.1.11",
-    "@types/node": "^20",
+    "@types/node": "^24.19.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "9.39.1",

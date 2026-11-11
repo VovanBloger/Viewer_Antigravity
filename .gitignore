@@ -29,3 +29,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# локальные базы очереди заданий (основная живёт в домашнем каталоге)
+*.db
+*.db-wal
+*.db-shm
+/.viewer-live/
