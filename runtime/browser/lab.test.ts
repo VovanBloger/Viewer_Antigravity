@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BrowserLab } from './lab.ts';
+import { listenBrowserFixture } from './testing.ts';
 
 test('real Chromium: isolated actors, owner and pause checks, actual screenshot', { timeout: 60_000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-browser-'));
@@ -12,7 +13,7 @@ test('real Chromium: isolated actors, owner and pause checks, actual screenshot'
     res.setHeader('content-type', 'text/html');
     res.end(`<body><label>Value<input aria-label="Value"></label><button onclick="localStorage.setItem('v', document.querySelector('input').value); document.querySelector('output').textContent=localStorage.v">Save</button><output>empty</output></body>`);
   });
-  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  await listenBrowserFixture(server);
   const address = server.address() as { port: number };
   const url = `http://127.0.0.1:${address.port}`;
   const lab = new BrowserLab(root, true);
