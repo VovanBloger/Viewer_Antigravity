@@ -1,187 +1,112 @@
-import fs from "node:fs";
+/**
+ * Viewer 2 — канонический адаптер ожидателя задач для проектов Telegram Dev Bot.
+ *
+ *   tsx integrations/devbot/runner/wait-command.ts --project=<id> --db=<путь> [--owner=<имя>] [--executor=antigravity]
+ *
+ * Требует явного указания --project и --db, сверяет путь проекта, не убивает чужие процессы,
+ * атомарно захватывает задачу и печатает в stdout ровно одну строку JSON с инструкциями.
+ */
+
+import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import dotenv from "dotenv";
 dotenv.config();
 
 import { openStore, defaultDbPath } from "../../../runtime/queue/index.ts";
-import { getDevBotSettings, ensureDevBotDirectories, registerDefaultProjects } from "../config.ts";
+import { toPublicTask } from "../../../runtime/service.ts";
+import { parseArgs, optString, requireString, quoteArg } from "../../../runtime/cli/args.ts";
 
-function detectTargetProject(): string | undefined {
-  const args = process.argv.slice(2);
-  const projArg = args.find((a) => a.startsWith("--project="));
-  if (projArg) return projArg.replace("--project=", "").toLowerCase().trim();
-
-  if (process.env.DEV_PROJECT_ID) return process.env.DEV_PROJECT_ID.toLowerCase().trim();
-
-  const cwd = process.cwd().toLowerCase();
-  if (cwd.includes("viewer")) return "viewer";
-  if (cwd.includes("myassagent") || cwd.includes("assistant")) return "myassagent";
-  if (cwd.includes("vpn")) return "vpn";
-  if (cwd.includes("antigravity dev bot")) return "devbot";
-  if (cwd.includes("crm") || cwd.includes("журнал")) return "crm";
-  if (cwd.includes("cyber-empire") || cwd.includes("game")) return "game";
-
-  return undefined;
+function info(msg: string): void {
+  console.error(`[wait-command] ${msg}`);
 }
 
-const targetProjectId = detectTargetProject();
-const args = process.argv.slice(2);
-const dbArg = args.find((a) => a.startsWith("--db="));
-const dbPath = dbArg ? dbArg.replace("--db=", "").trim() : (process.env.VIEWER_QUEUE_DB || defaultDbPath());
+function defaultOwner(executorId: string): string {
+  const host = os.hostname().replace(/[^A-Za-z0-9_-]/g, "") || "host";
+  return `${executorId}-${host}-${randomBytes(3).toString("hex")}`;
+}
 
-const settings = getDevBotSettings();
-ensureDevBotDirectories(settings);
+async function main(): Promise<number> {
+  const parsed = parseArgs(process.argv.slice(2));
 
-const LOCK_FILE = path.join(settings.lockDir, `listener-${targetProjectId || "all"}.lock`);
-
-function checkSingleInstance() {
+  let projectArg: string;
   try {
-    if (fs.existsSync(LOCK_FILE)) {
-      const raw = fs.readFileSync(LOCK_FILE, "utf-8").trim();
-      let existingPid: number | null = null;
-      let updatedAt = 0;
-      try {
-        const parsed = JSON.parse(raw);
-        existingPid = parsed.pid;
-        updatedAt = parsed.updatedAt || 0;
-      } catch {
-        existingPid = parseInt(raw, 10);
-      }
+    projectArg = requireString(parsed, "project").trim().toLowerCase();
+  } catch {
+    info("Ошибка: параметр --project=<id> обязателен (угадывание по cwd запрещено)");
+    return 2;
+  }
 
-      const isAlive = (pid: number) => {
-        try {
-          process.kill(pid, 0);
-          return true;
-        } catch {
-          return false;
-        }
-      };
-
-      if (existingPid && !isNaN(existingPid) && existingPid !== process.pid) {
-        const isFresh = Date.now() - updatedAt < 15000;
-        if (isAlive(existingPid) && isFresh && !process.argv.includes("--force")) {
-          console.log(`[wait-command] Слушатель проекта ${targetProjectId} уже активно работает (PID: ${existingPid}). Выход.`);
-          process.exit(0);
-        }
-        try {
-          process.kill(existingPid);
-        } catch {}
-      }
-    }
-    touchLock();
-  } catch {}
-}
-
-function touchLock() {
-  try {
-    fs.writeFileSync(
-      LOCK_FILE,
-      JSON.stringify({ pid: process.pid, projectId: targetProjectId, updatedAt: Date.now() }),
-      "utf-8"
-    );
-  } catch {}
-}
-
-function cleanupLock() {
-  try {
-    if (fs.existsSync(LOCK_FILE)) {
-      const raw = fs.readFileSync(LOCK_FILE, "utf-8").trim();
-      let existingPid: number | null = null;
-      try {
-        existingPid = JSON.parse(raw).pid;
-      } catch {
-        existingPid = parseInt(raw, 10);
-      }
-      if (existingPid === process.pid) {
-        fs.unlinkSync(LOCK_FILE);
-      }
-    }
-  } catch {}
-}
-
-process.on("exit", cleanupLock);
-process.on("SIGINT", () => {
-  cleanupLock();
-  process.exit(0);
-});
-process.on("SIGTERM", () => {
-  cleanupLock();
-  process.exit(0);
-});
-
-async function main() {
-  checkSingleInstance();
+  const dbPath = optString(parsed, "db") || process.env.VIEWER_QUEUE_DB || defaultDbPath();
+  const executorId = (optString(parsed, "executor") || "antigravity").trim();
+  const owner = (optString(parsed, "owner") || defaultOwner(executorId)).trim();
+  const pollMs = 1500;
 
   const store = openStore({ dbPath });
-  registerDefaultProjects(store);
 
-  const project = targetProjectId ? store.getProject(targetProjectId) : undefined;
-  const projectLabel = project ? `${project.name} (${project.id})` : (targetProjectId || "Любой проект");
+  const project = store.getProject(projectArg);
+  if (!project) {
+    info(`Ошибка: проект «${projectArg}» не зарегистрирован в базе ${dbPath}. Выход.`);
+    store.close();
+    return 2;
+  }
 
-  console.log(`[wait-command] 🎧 Слушатель активен для: ${projectLabel}`);
-  console.log(`[wait-command] Ожидание задач из SQLite очереди Viewer (0 токенов)...`);
+  info(`Слушатель активен для: ${project.name} (${project.id})`);
+  info(`Исполнитель: ${executorId}, владелец: ${owner}`);
+  info(`Каталог проекта: ${project.path}`);
+  info(`Тихое ожидание (0 токенов)...`);
 
-  const owner = `antigravity-${os.hostname()}-${process.pid}`;
+  const taskCli = "npm run --silent devbot:cmd --";
+  const waitCli = "npm run --silent devbot:wait --";
+
   let loops = 0;
-
   while (true) {
     loops += 1;
-    if (loops % 3 === 0) {
-      touchLock();
-    }
-
-    // Determine target projects to check
-    const candidateProjects = targetProjectId
-      ? [targetProjectId]
-      : store.listProjects().map((p) => p.id);
-
-    for (const projId of candidateProjects) {
+    try {
       const task = store.claimNext({
-        projectId: projId,
-        executorId: "antigravity",
+        projectId: project.id,
+        executorId,
         owner,
       });
 
       if (task) {
-        const taskProject = store.getProject(task.projectId) || {
-          id: task.projectId,
-          name: task.projectId,
-          path: process.cwd(),
+        const payload = {
+          source: "VIEWER_AGENT_QUEUE",
+          status: "NEW_TASK",
+          owner,
+          project: {
+            id: project.id,
+            name: project.name,
+            path: project.path,
+          },
+          task: toPublicTask(task),
+          instructions: {
+            heartbeat: `${taskCli} heartbeat ${task.id} --owner=${quoteArg(owner)} --db=${quoteArg(dbPath)}`,
+            report: `${taskCli} complete ${task.id} "@report.json" --owner=${quoteArg(owner)} --db=${quoteArg(dbPath)}`,
+            fail: `${taskCli} fail ${task.id} "ПРИЧИНА" --owner=${quoteArg(owner)} --db=${quoteArg(dbPath)}`,
+            rearm: `${waitCli} --project=${quoteArg(project.id)} --executor=${quoteArg(executorId)} --db=${quoteArg(dbPath)}`,
+          },
         };
 
-        console.log(
-          JSON.stringify({
-            source: "ANTIGRAVITY_DEV_BOT",
-            status: "NEW_COMMAND",
-            id: task.id,
-            projectId: taskProject.id,
-            projectName: taskProject.name,
-            projectPath: taskProject.path,
-            chatId: task.notify?.chatId,
-            author: (task.meta?.author as string) || "Пользователь",
-            text: task.goal,
-            isDangerous: false,
-            createdAt: task.createdAt,
-            attachments: (task.meta?.attachments as any[]) || [],
-          })
-        );
-
-        cleanupLock();
-        process.exit(0);
+        process.stdout.write(`${JSON.stringify(payload)}\n`);
+        store.close();
+        return 0;
       }
+    } catch (err: any) {
+      info(`Ошибка чтения очереди: ${err.message || err}`);
     }
 
     if (loops % 120 === 0) {
-      console.log(`[wait-command] 💓 Heartbeat [${projectLabel}]: слушатель активен, время: ${new Date().toLocaleTimeString("ru-RU")}`);
+      info(`💓 Heartbeat [${project.id}]: слушатель активен, время: ${new Date().toLocaleTimeString("ru-RU")}`);
     }
 
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, pollMs));
   }
 }
 
-main().catch((err) => {
-  cleanupLock();
-  console.error("[wait-command] Error:", err);
+main().then((code) => {
+  process.exit(code);
+}).catch((err) => {
+  info(`Фатальная ошибка: ${err.message || err}`);
   process.exit(1);
 });

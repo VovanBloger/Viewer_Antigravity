@@ -14,7 +14,8 @@
     "agents:task": "tsx runtime/cli/task.ts",
     "devbot:start": "tsx integrations/devbot/index.ts",
     "devbot:cmd": "tsx integrations/devbot/runner/cli.ts",
-    "devbot:wait": "tsx integrations/devbot/runner/wait-command.ts"
+    "devbot:wait": "tsx integrations/devbot/runner/wait-command.ts",
+    "devbot:migrate": "tsx integrations/devbot/runner/migrate.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

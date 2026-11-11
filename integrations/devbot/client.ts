@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { redactDeep } from "../../runtime/queue/redact.ts";
 import type { SendMessageOptions, TelegramUpdate } from "./types.ts";
 
 export type CustomFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -6,6 +7,19 @@ export type CustomFetch = (input: string | URL | Request, init?: RequestInit) =>
 export interface TelegramClientOptions {
   token?: string;
   fetcher?: CustomFetch;
+}
+
+/**
+ * Sanitizes URLs and sensitive tokens from error messages and logs.
+ */
+export function sanitizeErrorMessage(message: string): string {
+  if (!message) return "";
+  return message
+    .replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot[REDACTED_TOKEN]")
+    .replace(/https?:\/\/api\.telegram\.org\/bot[^\s"']+/g, "[REDACTED_TELEGRAM_URL]")
+    .replace(/https?:\/\/[^\s"']+\.googleapis\.com[^\s"']*/g, "[REDACTED_GOOGLE_API_URL]")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [REDACTED]")
+    .replace(/key=[A-Za-z0-9_-]+/gi, "key=[REDACTED]");
 }
 
 export class TelegramClient {
@@ -58,51 +72,64 @@ export class TelegramClient {
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(35000),
       });
-      return await res.json();
+      const data = await res.json();
+      return data;
     } catch (err: any) {
-      return { ok: false, error: err.message || String(err) };
+      const sanitized = sanitizeErrorMessage(err.message || String(err));
+      return { ok: false, error: sanitized };
     }
   }
 
-  async sendMessage(chatId: number | string, text: string, options?: SendMessageOptions): Promise<any> {
-    if (text.length > 4000) {
-      const chunks: string[] = [];
-      let current = "";
-      const paragraphs = text.split("\n\n");
-      for (const p of paragraphs) {
-        if ((current ? current + "\n\n" + p : p).length <= 3900) {
-          current = current ? current + "\n\n" + p : p;
+  /**
+   * Safely chunks text to <= 3900 characters (under Telegram's 4096 limit).
+   * Respects line breaks and whitespace.
+   */
+  static splitIntoChunks(text: string, maxLen = 3900): string[] {
+    if (text.length <= maxLen) return [text];
+    const chunks: string[] = [];
+    let current = "";
+
+    const lines = text.split("\n");
+    for (const line of lines) {
+      if ((current ? current + "\n" + line : line).length <= maxLen) {
+        current = current ? current + "\n" + line : line;
+      } else {
+        if (current) chunks.push(current);
+        if (line.length <= maxLen) {
+          current = line;
         } else {
-          if (current) chunks.push(current);
-          if (p.length <= 3900) {
-            current = p;
-          } else {
-            const lines = p.split("\n");
-            for (const l of lines) {
-              if ((current ? current + "\n" + l : l).length <= 3900) {
-                current = current ? current + "\n" + l : l;
-              } else {
-                if (current) chunks.push(current);
-                current = l;
-              }
-            }
+          // Break very long unbroken line by space or slice
+          let rest = line;
+          while (rest.length > maxLen) {
+            let splitIndex = rest.lastIndexOf(" ", maxLen);
+            if (splitIndex <= 0) splitIndex = maxLen;
+            chunks.push(rest.slice(0, splitIndex));
+            rest = rest.slice(splitIndex).trimStart();
           }
+          current = rest;
         }
       }
-      if (current) chunks.push(current);
-
-      let lastRes: any = null;
-      for (let i = 0; i < chunks.length; i++) {
-        const isLast = i === chunks.length - 1;
-        lastRes = await this.sendSingleMessage(chatId, chunks[i], {
-          ...options,
-          reply_markup: isLast ? options?.reply_markup : undefined,
-        });
-      }
-      return lastRes;
     }
+    if (current) chunks.push(current);
+    return chunks;
+  }
 
-    return this.sendSingleMessage(chatId, text, options);
+  async sendMessage(chatId: number | string, text: string, options?: SendMessageOptions): Promise<any> {
+    const chunks = TelegramClient.splitIntoChunks(text, 3900);
+
+    let lastRes: any = null;
+    for (let i = 0; i < chunks.length; i++) {
+      const isLast = i === chunks.length - 1;
+      lastRes = await this.sendSingleMessage(chatId, chunks[i], {
+        ...options,
+        reply_markup: isLast ? options?.reply_markup : undefined,
+      });
+
+      if (!lastRes || lastRes.ok === false) {
+        return lastRes;
+      }
+    }
+    return lastRes;
   }
 
   private async sendSingleMessage(chatId: number | string, text: string, options?: SendMessageOptions): Promise<any> {
@@ -113,6 +140,7 @@ export class TelegramClient {
       reply_markup: options?.reply_markup,
       disable_web_page_preview: options?.disable_web_page_preview ?? true,
     });
+
     if (!res.ok && res.description && res.description.includes("can't parse entities")) {
       // Fallback to plain text on entity parse errors
       return this.apiCall("sendMessage", {
@@ -176,17 +204,26 @@ export class TelegramClient {
     }
   }
 
-  async getFile(fileId: string): Promise<{ ok: boolean; result?: { file_path: string }; description?: string }> {
+  async getFile(fileId: string): Promise<{ ok: boolean; result?: { file_path: string; file_size?: number }; description?: string; error?: string }> {
     return this.apiCall("getFile", { file_id: fileId });
   }
 
-  async downloadFile(filePath: string): Promise<Buffer> {
+  async downloadFile(filePath: string, maxBytes = 20 * 1024 * 1024): Promise<Buffer> {
     const url = `${this.fileBaseUrl}/${filePath}`;
     const res = await this.fetcher(url, { signal: AbortSignal.timeout(60000) });
     if (!res.ok) {
       throw new Error(`Failed to download Telegram file: HTTP ${res.status}`);
     }
+
+    const contentLength = res.headers.get("content-length");
+    if (contentLength && parseInt(contentLength, 10) > maxBytes) {
+      throw new Error(`Размер файла превышает лимит (${Math.round(maxBytes / 1024 / 1024)} МБ)`);
+    }
+
     const arrayBuffer = await res.arrayBuffer();
+    if (arrayBuffer.byteLength > maxBytes) {
+      throw new Error(`Размер файла превышает лимит (${Math.round(maxBytes / 1024 / 1024)} МБ)`);
+    }
     return Buffer.from(arrayBuffer);
   }
 
@@ -202,10 +239,15 @@ export class TelegramClient {
       buffer = audioBufferOrPath;
     }
 
+    // Inspect audio header to verify Ogg container
+    const isOgg = buffer.length >= 4 && buffer.slice(0, 4).toString("ascii") === "OggS";
+    const mimeType = isOgg ? "audio/ogg" : "audio/mpeg";
+    const fileName = isOgg ? "voice.ogg" : "voice.mp3";
+
     const formData = new FormData();
     formData.append("chat_id", String(chatId));
-    if (caption) formData.append("caption", caption);
-    formData.append("voice", new Blob([new Uint8Array(buffer)], { type: "audio/ogg" }), "voice.ogg");
+    if (caption) formData.append("caption", caption.slice(0, 1024));
+    formData.append("voice", new Blob([new Uint8Array(buffer)], { type: mimeType }), fileName);
 
     const url = `${this.baseUrl}/sendVoice`;
     try {
@@ -214,9 +256,11 @@ export class TelegramClient {
         body: formData,
         signal: AbortSignal.timeout(60000),
       });
-      return await res.json();
+      const data = await res.json();
+      return data;
     } catch (e: any) {
-      return { ok: false, error: e.message || String(e) };
+      const sanitized = sanitizeErrorMessage(e.message || String(e));
+      return { ok: false, error: sanitized };
     }
   }
 }

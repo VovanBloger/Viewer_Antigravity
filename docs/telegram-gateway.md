@@ -6,15 +6,18 @@
 
 ## 1. Архитектура и назначение
 
-Предыдущая версия шлюза разработки (`C:/Users/vovan/Desktop/Antigravity Dev Bot`) использовала файловую модель очереди `queue.json` с небезопасным конкурентным чтением/записью (`read-modify-write`), привязкой к жестким путям на Desktop и глобальным состоянием одного подтверждения (`pendingConfirmationId`).
+Предыдущая версия шлюза разработки (`C:/Users/vovan/Desktop/Antigravity Dev Bot`) использовала файловую модель `queue.json` с небезопасным конкурентным чтением/записью (`read-modify-write`), привязкой к жестким путям на Desktop и глобальным состоянием одного подтверждения (`pendingConfirmationId`).
 
 Новая архитектура в `integrations/devbot`:
-- **Единое SQLite-хранилище:** Все задачи (от Codex, Claude и Telegram) живут в атомарной очереди SQLite (`tasks`, `projects`, `events`, `notifications`), защищенной `BEGIN IMMEDIATE … COMMIT`.
-- **Конфигурируемость и переносимость:** Пути вычисляются динамически относительно настраиваемой директории (`DEVBOT_DATA_DIR` или `.viewer-live/devbot`), без захардкоженных путей к Desktop.
-- **Множественные независимые подтверждения (Pending Confirmations):** Опасные команды получают уникальный ID (`CONF-...`) и регистрируются независимо. Нажатие подтверждения/отмены на одном сообщении не ломает другие ожидающие задачи.
-- **Надежный Long-Polling:** Персистентное сохранение смещения (`persisted offset`) и строгая дедупликация `update_id` защищают от повторной обработки команд при рестартах процесса и сбоях сети.
-- **Outbox-уведомления с разделением текста и голоса:** Уведомления о статусах формируются в таблице `notifications`. Успешная отправка текста фиксируется отдельно — временный сбой синтезатора речи (TTS) **не приводит** к повторной отправке текстового отчета пользователю при ретрае.
-- **Изоляция локальных задач:** Локальные задачи координатора Codex/Claude (`notify.telegram = false`) не генерируют сетевых вызовов в Telegram.
+- **Единое SQLite-хранилище:** Все задачи (от Codex, Claude и Telegram) живут в атомарной очереди SQLite (`tasks`, `projects`, `events`, `notifications`), защищенной транзакциями `BEGIN IMMEDIATE … COMMIT`.
+- **Durable Inbox в SQLite (`devbot_inbox`):** Входящие обновления сохраняются в SQLite до обработки. Курсор смещения (`devbot_cursor`) продвигается только после успешной фиксации обновлений на диске. Сбой процесса не приводит к потере или дублированию задач.
+- **Атомарный Single-Poller Lock (`devbot_locks`):** Защита от запуска дублирующих процессов-поллеров привязана к идентификатору бота и SQLite базе данных (с таймаутом аренды и heartbeat). При конфликте процесс завершается (`fail-closed`), не убивая сторонние PID.
+- **Множественные независимые подтверждения (Pending Confirmations):** Опасные команды получают уникальный ID (`CONF-...`), привязываются к конкретному `chat_id` и `user_id`, сохраняются в таблице `devbot_confirmations` и переживают перезапуск бота.
+- **Точная маршрутизация проектов (Zero Substring Guessing):** Угадывание проектов по подстрокам («crm», «vpn») полностью удалено во избежание непреднамеренной перемаршрутизации. Проект выбирается явно кнопкой, командой `/project <id>` или префиксом `/p <id> <команда>`. Запрос несуществующего проекта отклоняется с ошибкой (без скрытого fallback).
+- **Строгая авторизация:** Принимаются только положительные числовые Telegram User ID (`TELEGRAM_ALLOWED_USERS`). Имена пользователей (username) не используются как идентификатор. Команды разработки разрешены строго в приватных диалогах (`chat.type === "private"`), предотвращая утечки в группы.
+- **Durable Outbox с защитой от дублирования:** Состояние отправки текста и голоса сохраняется в `devbot_outbox_progress`. Снимок отчёта фиксируется в момент создания события, поэтому старые раунды не перезаписываются новыми отчётами. Успешно отправленный текст **никогда не переотправляется** при ретраях голоса или перезапуске процесса.
+- **Честные границы доставки:** В протоколе Telegram Bot API отсутствует сквозной client-generated idempotency key для `sendMessage`/`sendVoice`. Неустранимое окно неопределённости возникает при сетевом сбое между приёмом запроса сервером Telegram и получением HTTP-ответа клиентом. Это окно минимизировано за счёт пофрагментного сохранения прогресса в SQLite непосредственно до и после сетевых вызовов.
+- **Изоляция локальных задач:** Локальные задачи координатора Codex/Claude (`notify.telegram = false`) не генерируют сетевых вызовов и уведомлений в Telegram.
 
 ---
 
@@ -23,23 +26,25 @@
 ```
 integrations/devbot/
 ├── types.ts                      # Контракты Telegram, вложений, конфигурации и outbox
-├── config.ts                     # Загрузка настроек, переменных окружения и реестра проектов
-├── client.ts                     # Легковесный клиент Telegram Bot API с поддержкой custom fetch
-├── security.ts                   # Авторизация по белому списку и детекция опасных команд
+├── db.ts                         # SQLite хранилище: locks, inbox, cursor, confirmations, outbox
+├── config.ts                     # Загрузка настроек, числовых ID и реестра проектов
+├── client.ts                     # Telegram Bot API клиент: безопасный чанкинг (<=3900), redaction
+├── security.ts                   # Числовая авторизация, валидация private chat, HTML escaping
 ├── keyboards.ts                  # Динамические инлайн-кнопки проектов, меню и подтверждений
-├── handlers.ts                   # Обработка сообщений, голосовых, фото, документов и callback-запросов
-├── outbox.ts                     # Доставка отчетов и уведомлений в Telegram с retry
-├── gateway.ts                    # Координатор polling, single-instance lock и dedup
+├── handlers.ts                   # Обработка сообщений, голосовых, фото, документов (UUID + sanitize)
+├── outbox.ts                     # Доставка отчетов и уведомлений в Telegram с retry и снимком
+├── gateway.ts                    # Координатор polling, atomic DB lock, durable inbox
 ├── index.ts                      # Точка входа сервиса-демона
-├── projects.config.example.json  # Пример конфигурации проектов (включая viewer, crm, vpn, game)
+├── projects.config.example.json  # Пример конфигурации проектов с относительными путями
 ├── audio/
-│   ├── stt.ts                    # Распознавание речи через Gemini API с поддержкой моков
-│   └── tts.ts                    # Нормализация ударений и синтез речи через edge-tts с моками
+│   ├── stt.ts                    # Распознавание речи через явно заданную модель Gemini
+│   └── tts.ts                    # Нормализация ударений и синтез речи через edge-tts
 ├── runner/
-│   ├── cli.ts                    # Фасад CLI (status, start, complete, fail)
-│   └── wait-command.ts           # Слушатель очереди для фонового ожидания в беседах Antigravity
+│   ├── cli.ts                    # Совместимый CLI (status, start, complete, fail)
+│   ├── wait-command.ts           # Канонический адаптер слушателя для бесед Antigravity
+│   └── migrate.ts                # Идемпотентный CLI импорта legacy queue.json в SQLite
 └── tests/
-    └── gateway.test.ts           # Набор тестов (replay, media, unknown project, cancel, outbox retries)
+    └── gateway.test.ts           # Набор тестов (конкуренция, replay, outbox, routing, security)
 ```
 
 ---
@@ -55,12 +60,18 @@ npm run devbot:start
 npm run devbot:cmd status
 
 # Запуск тихого слушателя очереди (0 токенов в ожидании)
-npm run devbot:wait -- --project=viewer
-npm run devbot:wait -- --project=crm
+npm run devbot:wait -- --project=viewer --db=".viewer-live/agent-queue.db"
+npm run devbot:wait -- --project=crm --db=".viewer-live/agent-queue.db"
 
-# Завершение задачи и отправка отчёта
-npm run devbot:cmd complete T-000001 @report.txt
-npm run devbot:cmd fail T-000001 "Текст ошибки"
+# Завершение задачи и сохранение отчёта (отправку в Telegram выполняет демон)
+npm run devbot:cmd complete T-000001 @report.txt --owner=antigravity-PC-0063db
+npm run devbot:cmd fail T-000001 "Текст ошибки" --owner=antigravity-PC-0063db
+
+# Идемпотентная миграция старой очереди в SQLite
+npm run devbot:migrate -- \
+  --queue="C:/path/to/queue.json" \
+  --projects="C:/path/to/projects.config.json" \
+  --db=".viewer-live/agent-queue.db"
 ```
 
 ### Тестирование и верификация типов
@@ -78,21 +89,24 @@ npx tsc --noEmit
 
 ### Шаги переключения (Live Cutover)
 1. **Остановка старого бота на Desktop:**
+   Найти конкретный процесс по заголовку или PID:
    ```powershell
-   # Завершить процесс Antigravity Dev Bot на Desktop
-   Get-Process -Name node | Stop-Process
+   # Завершить ТОЛЬКО процесс старого бота Antigravity Dev Bot:
+   Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*Antigravity Dev Bot*" } | ForEach-Object { Stop-Process -Id $_.ProcessId }
    ```
 2. **Импорт истории и существующих проектов в SQLite:**
    ```bash
-   node --import tsx runtime/queue/legacy-import.ts \
+   npm run devbot:migrate -- \
      --queue="C:/Users/vovan/Desktop/Antigravity Dev Bot/data/queue.json" \
-     --projects="C:/Users/vovan/Desktop/Antigravity Dev Bot/config/projects.config.json"
+     --projects="C:/Users/vovan/Desktop/Antigravity Dev Bot/config/projects.config.json" \
+     --db="C:/Users/vovan/Documents/Codex/2026-11-11/new-chat/outputs/Viewer2/.viewer-live/agent-queue.db"
    ```
+   *Примечание:* Исходные файлы `queue.json` и `projects.config.json` только читаются, в них ничего не записывается.
 3. **Настройка переменных окружения:**
    В корне проекта задать в `.env`:
    ```env
    TELEGRAM_BOT_TOKEN="<ТОКЕН_БОТА>"
-   TELEGRAM_ALLOWED_USERS="356165930,Vovanbloger"
+   TELEGRAM_ALLOWED_USERS="356165930"
    GEMINI_API_KEY="<КЛЮЧ_GEMINI>"
    VIEWER_QUEUE_DB="C:/Users/vovan/Documents/Codex/2026-11-11/new-chat/outputs/Viewer2/.viewer-live/agent-queue.db"
    ```
@@ -103,7 +117,7 @@ npx tsc --noEmit
 
 ### План отката (Rollback)
 Исходные файлы бота на `C:/Users/vovan/Desktop/Antigravity Dev Bot` не изменялись. В случае необходимости отката:
-1. Остановить процесс нового шлюза: `Ctrl+C` или завершить процесс `node`.
+1. Завершить процесс нового шлюза через `Ctrl+C` или остановить процесс по PID.
 2. Запустить старый бот:
    ```powershell
    cd "C:\Users\vovan\Desktop\Antigravity Dev Bot"; npm start

@@ -4,41 +4,26 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import { openStore, defaultDbPath } from "../../../runtime/queue/index.ts";
-import { TelegramClient } from "../client.ts";
-import { OutboxService } from "../outbox.ts";
-import { loadProjectConfigs } from "../config.ts";
+import { parseArgs, optString, requireString } from "../../../runtime/cli/args.ts";
 
 function readContent(arg: string): string {
   if (arg.startsWith("@")) {
     const filePath = arg.slice(1).trim().replace(/^["']|["']$/g, "");
-    const candidates = [
-      filePath,
-      path.resolve(process.cwd(), filePath),
-      path.resolve("C:/Users/vovan/Desktop/Журнал CRM", filePath),
-      path.resolve("H:/Мой диск/VPN", filePath),
-      path.resolve("C:/Users/vovan/Desktop/MyAssAgent", filePath),
-      path.resolve("C:/Users/vovan/Desktop/Antigravity Dev Bot", filePath),
-    ];
-    for (const cand of candidates) {
-      if (fs.existsSync(cand) && fs.statSync(cand).isFile()) {
-        return fs.readFileSync(cand, "utf-8");
-      }
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Файл отчёта не найден: ${filePath}`);
     }
-    throw new Error(`Файл отчёта не найден: ${filePath}`);
+    return fs.readFileSync(filePath, "utf-8");
   }
   return arg;
 }
 
 function resolveTask(store: any, targetId: string) {
   if (!targetId) return undefined;
-  // Try direct ID
   let task = store.get(targetId);
   if (!task) {
-    // Try legacyId (e.g. CMD-071)
     task = store.getByLegacyId(targetId);
   }
   if (!task) {
-    // Try seq format
     const match = /^T-(\d+)$/i.exec(targetId);
     if (!match && /^\d+$/.test(targetId)) {
       task = store.get(`T-${targetId.padStart(6, "0")}`);
@@ -48,16 +33,14 @@ function resolveTask(store: any, targetId: string) {
 }
 
 async function main() {
-  const args = process.argv.slice(2);
-  const action = args[0]?.toLowerCase();
-  const targetId = args[1];
+  const parsed = parseArgs(process.argv.slice(2));
+  const action = parsed.positionals[0]?.toLowerCase();
+  const targetId = parsed.positionals[1];
 
-  const dbArg = args.find((a) => a.startsWith("--db="));
-  const dbPath = dbArg ? dbArg.replace("--db=", "").trim() : (process.env.VIEWER_QUEUE_DB || defaultDbPath());
+  const dbPath = optString(parsed, "db") || process.env.VIEWER_QUEUE_DB || defaultDbPath();
+  const explicitOwner = optString(parsed, "owner");
 
   const store = openStore({ dbPath });
-  const client = new TelegramClient();
-  const outbox = new OutboxService(client, store);
 
   if (action === "status") {
     const all = store.list();
@@ -96,15 +79,35 @@ async function main() {
       console.error(`❌ Задание #${targetId} не найдено`);
       process.exit(1);
     }
-    console.log(`✔ Задание #${task.id} (${task.projectId}) переведено в статус IN_PROGRESS`);
+
+    if (!explicitOwner) {
+      console.error("Ошибка: требуется явный параметр --owner=<имя> (имперсонация запрещена)");
+      process.exit(1);
+    }
+
+    if (task.status === "QUEUED") {
+      store.claimNext({
+        projectId: task.projectId,
+        executorId: task.executorId,
+        owner: explicitOwner,
+      });
+    }
+
+    console.log(`✔ Задание #${task.id} (${task.projectId}) переведено в статус IN_PROGRESS для владельца ${explicitOwner}`);
     return;
   }
 
   if (action === "complete") {
-    if (!targetId || !args[2]) {
-      console.error("Использование: complete <TASK_ID> <текст_или_@файл>");
+    if (!targetId || !parsed.positionals[2]) {
+      console.error("Использование: complete <TASK_ID> <текст_или_@файл> --owner=<владелец> [--db=<путь>]");
       process.exit(1);
     }
+
+    if (!explicitOwner) {
+      console.error("Ошибка: требуется явный параметр --owner=<имя>");
+      process.exit(1);
+    }
+
     const task = resolveTask(store, targetId);
     if (!task) {
       console.error(`❌ Задание #${targetId} не найдено`);
@@ -116,10 +119,11 @@ async function main() {
       return;
     }
 
-    const reportText = readContent(args[2]);
+    const reportText = readContent(parsed.positionals[2]);
 
-    // Report task via store
-    store.report(task.id, task.owner || "antigravity", {
+    // Report task via store - saving result in SQLite queue
+    // Outbox notifications are sent exclusively by the gateway daemon (Point 2: single sender)
+    store.report(task.id, explicitOwner, {
       summary: reportText,
       changedFiles: [],
       checks: [],
@@ -127,39 +131,41 @@ async function main() {
       openQuestions: [],
     });
 
-    console.log(`✔ Задание #${task.id} помечено как REPORTED`);
-
-    // Process notification delivery via Outbox
-    await outbox.deliverPending();
+    console.log(`✔ Задание #${task.id} сохранено в очереди со статусом REPORTED (доставка выполняется шлюзом)`);
     return;
   }
 
   if (action === "fail") {
-    if (!targetId || !args[2]) {
-      console.error("Использование: fail <TASK_ID> <текст_ошибки_или_@файл>");
+    if (!targetId || !parsed.positionals[2]) {
+      console.error("Использование: fail <TASK_ID> <текст_ошибки_или_@файл> --owner=<владелец> [--db=<путь>]");
       process.exit(1);
     }
+
+    if (!explicitOwner) {
+      console.error("Ошибка: требуется явный параметр --owner=<имя>");
+      process.exit(1);
+    }
+
     const task = resolveTask(store, targetId);
     if (!task) {
       console.error(`❌ Задание #${targetId} не найдено`);
       process.exit(1);
     }
 
-    const errorText = readContent(args[2]);
-    store.fail(task.id, task.owner || "antigravity", {
+    const errorText = readContent(parsed.positionals[2]);
+    store.fail(task.id, explicitOwner, {
       code: "EXECUTOR_ERROR",
       reason: errorText,
     });
 
-    console.log(`✔ Задание #${task.id} помечено как FAILED`);
-    await outbox.deliverPending();
+    console.log(`✔ Задание #${task.id} сохранено в очереди со статусом FAILED (доставка выполняется шлюзом)`);
     return;
   }
 
-  console.log("Использование: cli.ts [status|start|complete|fail] [TASK_ID] [данные]");
+  console.log("Использование: cli.ts [status|start|complete|fail] [TASK_ID] [данные] --owner=<владелец> [--db=<путь>]");
 }
 
 main().catch((err) => {
-  console.error("Ошибка CLI:", err);
+  console.error("Ошибка CLI:", err.message || err);
   process.exit(1);
 });

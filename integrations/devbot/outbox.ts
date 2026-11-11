@@ -4,41 +4,62 @@ import type { TelegramClient } from "./client.ts";
 import type { OutboxDeliveryResult } from "./types.ts";
 import { TtsService } from "./audio/tts.ts";
 import { getDevBotSettings } from "./config.ts";
+import { escapeHtml } from "./security.ts";
 import type { SqliteTaskStore } from "../../runtime/queue/store.ts";
+import { DevBotDb } from "./db.ts";
 
 export interface OutboxServiceOptions {
   maxRetries?: number;
   ttsCacheDir?: string;
+  dataDir?: string;
+  db?: DevBotDb;
 }
 
 export class OutboxService {
   private client: TelegramClient;
   private store: SqliteTaskStore;
+  private db: DevBotDb;
   private maxRetries: number;
   private ttsCacheDir: string;
-  private retryMap: Map<number, { attempts: number; textDelivered: boolean }> = new Map();
 
   constructor(client: TelegramClient, store: SqliteTaskStore, options?: OutboxServiceOptions) {
     this.client = client;
     this.store = store;
-    this.maxRetries = options?.maxRetries ?? 3;
+    this.maxRetries = options?.maxRetries ?? 5;
 
-    const settings = getDevBotSettings();
+    const settings = getDevBotSettings(options?.dataDir);
     this.ttsCacheDir = options?.ttsCacheDir || settings.ttsCacheDir;
     if (!fs.existsSync(this.ttsCacheDir)) {
       fs.mkdirSync(this.ttsCacheDir, { recursive: true });
     }
+
+    this.db = options?.db || new DevBotDb(path.join(settings.dataDir, "devbot.sqlite"));
   }
 
+  getDb(): DevBotDb {
+    return this.db;
+  }
+
+  /**
+   * Delivers pending notifications from SQLite store with durable chunk and retry state.
+   *
+   * Note on Telegram delivery semantics:
+   * Telegram Bot API lacks client-generated request idempotency keys for sendMessage/sendVoice.
+   * There is an irreducible ambiguous-send window if the network connection drops between
+   * Telegram accepting the HTTP POST and the client receiving HTTP 200. We minimize this window
+   * by recording exact per-chunk and per-channel progress in SQLite immediately around network calls.
+   */
   async deliverPending(): Promise<OutboxDeliveryResult[]> {
     const notifications = this.store.pendingNotifications();
     const results: OutboxDeliveryResult[] = [];
+    const now = Date.now();
 
     for (const notif of notifications) {
       const task = this.store.get(notif.taskId);
       if (!task) {
-        // Missing task — mark sent to avoid infinite loop
+        // Missing task — mark sent to avoid blocking queue
         this.store.markNotificationSent(notif.id);
+        this.db.deleteOutboxProgress(notif.id);
         continue;
       }
 
@@ -46,6 +67,7 @@ export class OutboxService {
       if (!task.notify?.telegram || !task.notify.chatId) {
         // Local task (e.g. Codex diagnostic/develop) — no Telegram/TTS notifications
         this.store.markNotificationSent(notif.id);
+        this.db.deleteOutboxProgress(notif.id);
         results.push({
           notificationId: notif.id,
           taskId: task.id,
@@ -56,131 +78,188 @@ export class OutboxService {
       }
 
       const chatId = task.notify.chatId;
-      const state = this.retryMap.get(notif.id) || { attempts: 0, textDelivered: false };
+
+      // 1. Load or initialize persistent progress record in SQLite
+      let progress = this.db.getOutboxProgress(notif.id);
+      if (!progress) {
+        // Freeze report snapshot per event: delayed old rounds NEVER send newest report!
+        const snapshot = JSON.stringify({
+          taskId: task.id,
+          projectId: task.projectId,
+          goal: task.goal,
+          kind: notif.kind,
+          round: task.round,
+          summary: task.report?.summary || null,
+          verdicts: task.verdicts,
+          failure: task.failure,
+        });
+
+        const fullMessageText = this.formatMessageFromSnapshot(snapshot);
+        // Pre-calculate chunks
+        const chunks = (this.client as any).constructor.splitIntoChunks(fullMessageText, 3900);
+        const voiceRequested = Boolean(task.notify.tts && notif.kind === "REPORTED" && task.report?.summary);
+
+        progress = this.db.initOutboxProgress(
+          notif.id,
+          task.id,
+          chatId,
+          snapshot,
+          chunks.length,
+          voiceRequested
+        );
+      }
+
+      // Check retry deadline
+      if (progress.next_retry_at > now) {
+        // Skip for now, retry deadline not reached
+        continue;
+      }
+
+      let textDelivered = Boolean(progress.text_delivered);
+      let voiceDelivered = Boolean(progress.voice_delivered);
+      const voicePending = Boolean(progress.voice_pending);
 
       try {
-        let textSent = state.textDelivered;
-        let voiceSent = false;
+        // 2. Deliver Text Chunks if not yet completed
+        if (!textDelivered) {
+          const fullMessageText = this.formatMessageFromSnapshot(progress.report_snapshot);
+          const chunks = (this.client as any).constructor.splitIntoChunks(fullMessageText, 3900);
 
-        // 1. Send Text Report if not yet delivered
-        if (!textSent) {
-          const textMessage = this.formatMessage(task, notif.kind);
-          const sendRes = await this.client.sendMessage(chatId, textMessage);
-          if (sendRes && sendRes.ok !== false) {
-            textSent = true;
-            state.textDelivered = true;
-          } else {
-            throw new Error(sendRes?.error || sendRes?.description || "Failed to send Telegram message");
-          }
-        }
-
-        // 2. Send Voice Report if requested and task completed with report
-        if (task.notify.tts && notif.kind === "REPORTED" && task.report?.summary) {
-          try {
-            const author = (task.meta?.author as string) || "Владимир";
-            const script = await TtsService.generateSpokenScript(task.goal, task.report.summary, author);
-            const audioFileName = `report_${task.id}_${Date.now()}.ogg`;
-            const audioFilePath = path.join(this.ttsCacheDir, audioFileName);
-
-            const synthesized = await TtsService.synthesize(script, audioFilePath);
-            if (synthesized) {
-              const voiceRes = await this.client.sendVoice(
-                chatId,
-                audioFilePath,
-                `🎙 Голосовой отчёт по задаче #${task.id}`
-              );
-              if (voiceRes && voiceRes.ok !== false) {
-                voiceSent = true;
-              }
+          for (let i = progress.text_chunks_sent; i < chunks.length; i++) {
+            const sendRes = await this.client.sendMessage(chatId, chunks[i]);
+            if (!sendRes || sendRes.ok === false) {
+              const errMsg = sendRes?.error || sendRes?.description || "Failed to send Telegram message";
+              throw new Error(errMsg);
             }
-          } catch (voiceErr: any) {
-            // Voice failure does NOT cause text re-send!
-            console.warn(`[OutboxService] Warning: TTS failed for task ${task.id}:`, voiceErr.message || voiceErr);
+            progress.text_chunks_sent = i + 1;
+            this.db.updateOutboxProgress(notif.id, { text_chunks_sent: i + 1 });
           }
+
+          textDelivered = true;
+          this.db.updateOutboxProgress(notif.id, { text_delivered: 1 });
         }
 
-        // Notification fully handled
-        this.store.markNotificationSent(notif.id);
-        this.retryMap.delete(notif.id);
+        // 3. Deliver Voice if pending and not yet delivered
+        if (voicePending && !voiceDelivered) {
+          const snapshotObj = JSON.parse(progress.report_snapshot);
+          const author = (task.meta?.author as string) || "Владимир";
+          const script = await TtsService.generateSpokenScript(snapshotObj.goal, snapshotObj.summary || "", author);
 
-        results.push({
-          notificationId: notif.id,
-          taskId: task.id,
-          textSent,
-          voiceSent,
-        });
+          const audioFileName = `report_${task.id}_${Date.now()}.ogg`;
+          const audioFilePath = path.join(this.ttsCacheDir, audioFileName);
+
+          const synthesized = await TtsService.synthesize(script, audioFilePath);
+          if (!synthesized) {
+            throw new Error("TTS synthesis produced empty or invalid audio file");
+          }
+
+          const voiceRes = await this.client.sendVoice(
+            chatId,
+            audioFilePath,
+            `🎙 Голосовой отчёт по задаче #${task.id}`
+          );
+
+          if (!voiceRes || voiceRes.ok === false) {
+            throw new Error(voiceRes?.error || voiceRes?.description || "Failed to send Telegram voice note");
+          }
+
+          voiceDelivered = true;
+          this.db.updateOutboxProgress(notif.id, { voice_delivered: 1, voice_pending: 0 });
+        }
+
+        // 4. Mark notification fully handled in store only when both text and voice succeeded
+        const allDone = textDelivered && (!voicePending || voiceDelivered);
+        if (allDone) {
+          this.store.markNotificationSent(notif.id);
+          this.db.deleteOutboxProgress(notif.id);
+
+          results.push({
+            notificationId: notif.id,
+            taskId: task.id,
+            textSent: textDelivered,
+            voiceSent: voiceDelivered,
+          });
+        }
       } catch (err: any) {
-        state.attempts += 1;
-        this.retryMap.set(notif.id, state);
+        const attempts = progress.attempts + 1;
+        // Exponential backoff retry deadline
+        const delayMs = Math.min(300_000, Math.pow(2, attempts) * 1000);
+        const nextRetryAt = Date.now() + delayMs;
 
-        console.error(`[OutboxService] Delivery error for notification #${notif.id} (attempt ${state.attempts}):`, err.message || err);
+        this.db.updateOutboxProgress(notif.id, {
+          attempts,
+          next_retry_at: nextRetryAt,
+          last_error: err.message || String(err),
+        });
+
+        console.error(
+          `[OutboxService] Delivery error for notification #${notif.id} (attempt ${attempts}, next retry in ${delayMs / 1000}s):`,
+          err.message || err
+        );
 
         results.push({
           notificationId: notif.id,
           taskId: task.id,
-          textSent: state.textDelivered,
-          voiceSent: false,
+          textSent: textDelivered,
+          voiceSent: voiceDelivered,
           error: err.message || String(err),
         });
 
-        if (state.attempts >= this.maxRetries) {
-          console.warn(`[OutboxService] Max retries (${this.maxRetries}) reached for notification #${notif.id}. Dropping.`);
-          this.store.markNotificationSent(notif.id);
-          this.retryMap.delete(notif.id);
-        }
+        // Do not drop notification silently on maxRetries; keep it pending with backoff
       }
     }
 
     return results;
   }
 
-  private formatMessage(task: any, kind: string): string {
-    const project = this.store.getProject(task.projectId);
-    const projectName = project ? `${project.name} (<code>${project.id}</code>)` : `<code>${task.projectId}</code>`;
+  private formatMessageFromSnapshot(rawSnapshot: string): string {
+    const s = JSON.parse(rawSnapshot);
+    const project = this.store.getProject(s.projectId);
+    const projectName = project ? `${escapeHtml(project.name)} (<code>${escapeHtml(project.id)}</code>)` : `<code>${escapeHtml(s.projectId)}</code>`;
 
-    if (kind === "REPORTED") {
-      const summary = task.report?.summary || "Отчёт сдан";
+    if (s.kind === "REPORTED") {
+      const summary = s.summary || "Отчёт сдан";
       return (
-        `✅ <b>ANTIGRAVITY: ЗАДАЧА #${task.id} ВЫПОЛНЕНА!</b>\n\n` +
+        `✅ <b>ANTIGRAVITY: ЗАДАЧА #${escapeHtml(s.taskId)} ВЫПОЛНЕНА!</b>\n\n` +
         `📁 Проект: <b>${projectName}</b>\n` +
-        `📝 <b>Команда:</b> <i>«${task.goal}»</i>\n\n` +
-        `<b>Результат выполнения:</b>\n${summary}`
+        `📝 <b>Команда:</b> <i>«${escapeHtml(s.goal)}»</i>\n\n` +
+        `<b>Результат выполнения:</b>\n${escapeHtml(summary)}`
       );
     }
 
-    if (kind === "APPROVED") {
+    if (s.kind === "APPROVED") {
       return (
-        `🎉 <b>ЗАДАЧА #${task.id} ПРИНЯТА (APPROVED)!</b>\n\n` +
+        `🎉 <b>ЗАДАЧА #${escapeHtml(s.taskId)} ПРИНЯТА (APPROVED)!</b>\n\n` +
         `📁 Проект: <b>${projectName}</b>\n` +
-        `📝 <b>Команда:</b> <i>«${task.goal}»</i>\n\n` +
+        `📝 <b>Команда:</b> <i>«${escapeHtml(s.goal)}»</i>\n\n` +
         `Координатор утвердил результаты задания.`
       );
     }
 
-    if (kind === "FAILED") {
-      const errorMsg = task.failure?.reason || "Неизвестная ошибка";
+    if (s.kind === "FAILED") {
+      const errorMsg = s.failure?.reason || "Неизвестная ошибка";
       return (
-        `❌ <b>ANTIGRAVITY: ОШИБКА ВЫПОЛНЕНИЯ #${task.id}</b>\n\n` +
+        `❌ <b>ANTIGRAVITY: ОШИБКА ВЫПОЛНЕНИЯ #${escapeHtml(s.taskId)}</b>\n\n` +
         `📁 Проект: <b>${projectName}</b>\n` +
-        `📝 <b>Команда:</b> <i>«${task.goal}»</i>\n\n` +
-        `<b>Текст ошибки:</b>\n${errorMsg}`
+        `📝 <b>Команда:</b> <i>«${escapeHtml(s.goal)}»</i>\n\n` +
+        `<b>Текст ошибки:</b>\n${escapeHtml(errorMsg)}`
       );
     }
 
-    if (kind === "RETURNED") {
-      const notes = task.verdicts?.[task.verdicts.length - 1]?.notes || task.failure?.reason || "Требуются исправления";
+    if (s.kind === "RETURNED") {
+      const notes = s.verdicts?.[s.verdicts.length - 1]?.notes || s.failure?.reason || "Требуются исправления";
       return (
-        `⚠️ <b>ЗАДАЧА #${task.id} ВОЗВРАЩЕНА НА ДОРАБОТКУ</b>\n\n` +
+        `⚠️ <b>ЗАДАЧА #${escapeHtml(s.taskId)} ВОЗВРАЩЕНА НА ДОРАБОТКУ</b>\n\n` +
         `📁 Проект: <b>${projectName}</b>\n` +
-        `📝 <b>Команда:</b> <i>«${task.goal}»</i>\n\n` +
-        `<b>Замечания координатора:</b>\n${notes}`
+        `📝 <b>Команда:</b> <i>«${escapeHtml(s.goal)}»</i>\n\n` +
+        `<b>Замечания координатора:</b>\n${escapeHtml(notes)}`
       );
     }
 
     return (
-      `ℹ️ <b>УВЕДОМЛЕНИЕ ПО ЗАДАЧЕ #${task.id}</b>\n\n` +
+      `ℹ️ <b>УВЕДОМЛЕНИЕ ПО ЗАДАЧЕ #${escapeHtml(s.taskId)}</b>\n\n` +
       `📁 Проект: <b>${projectName}</b>\n` +
-      `Статус: <b>${kind}</b>`
+      `Статус: <b>${escapeHtml(s.kind)}</b>`
     );
   }
 }

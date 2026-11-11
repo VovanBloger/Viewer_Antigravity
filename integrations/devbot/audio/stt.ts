@@ -16,7 +16,8 @@ export class SttService {
   }
 
   /**
-   * Transcribe audio buffer (ogg, mp3, wav) into text via Google Gemini API
+   * Transcribe audio buffer (ogg, mp3, wav) into text via explicitly configured Google Gemini model.
+   * No guessed model fallback loop; returns truthful errors on failure/quota.
    */
   static async transcribe(audioBuffer: Buffer, mimeType = "audio/ogg"): Promise<string> {
     if (this.mockTranscriber) {
@@ -28,6 +29,7 @@ export class SttService {
       throw new Error("GEMINI_API_KEY is not configured.");
     }
 
+    const model = (process.env.GEMINI_STT_MODEL || "gemini-2.0-flash").trim();
     const base64Data = audioBuffer.toString("base64");
     const promptText =
       "Внимательно прослушай это голосовое сообщение на русском языке. Предоставь точную, дословную текстовую расшифровку. Не добавляй собственных комментариев, примечаний и объяснений, только исключительно распознанные слова.";
@@ -52,39 +54,30 @@ export class SttService {
       },
     };
 
-    const models = [
-      "gemini-3.8-flash",
-      "gemini-flash-latest",
-      "gemini-3.6-flash",
-      "gemini-3.5-flash",
-      "gemini-3.5-flash-lite",
-      "gemini-3.5-transcribe",
-    ];
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
+    });
 
-    for (const model of models) {
+    if (!res.ok) {
+      const errText = await res.text();
+      let message = `HTTP ${res.status}`;
       try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(30000),
-        });
-
-        if (!res.ok) {
-          continue;
-        }
-
-        const data = (await res.json()) as any;
-        const candidate = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (candidate && candidate.trim()) {
-          return candidate.trim();
-        }
-      } catch {
-        // Try next model candidate
-      }
+        const parsed = JSON.parse(errText);
+        if (parsed.error?.message) message = parsed.error.message;
+      } catch {}
+      throw new Error(`Gemini STT (${model}) failed: ${message}`);
     }
 
-    throw new Error("Не удалось распознать речь через Gemini API.");
+    const data = (await res.json()) as any;
+    const candidate = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (candidate && candidate.trim()) {
+      return candidate.trim();
+    }
+
+    throw new Error("Gemini STT returned empty transcription candidate.");
   }
 }

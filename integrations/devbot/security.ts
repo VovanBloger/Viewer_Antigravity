@@ -4,18 +4,41 @@ export interface SecurityCheckResult {
   category?: "DATABASE" | "FILE_DELETION" | "CONFIG" | "DEPLOYMENT" | "GIT_FORCE";
 }
 
+/**
+ * Escapes HTML characters to prevent breaking Telegram sendMessage formatting
+ */
+export function escapeHtml(str: string): string {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export class SecurityGuard {
-  static isAuthorized(chatId: number | string, username?: string | null, allowedUsers?: Set<string>): boolean {
-    const allowed = allowedUsers || new Set(
-      (process.env.TELEGRAM_ALLOWED_USERS || "356165930,Vovanbloger")
-        .split(",")
-        .map((s) => s.trim().toLowerCase())
-        .filter(Boolean)
-    );
-    const idStr = String(chatId).trim().toLowerCase();
-    if (allowed.has(idStr)) return true;
-    if (username && allowed.has(username.toLowerCase().replace(/^@/, ""))) return true;
-    return false;
+  /**
+   * Only allows positive numeric Telegram user IDs explicitly configured in allowedUsers.
+   * Usernames are NOT accepted as identity.
+   */
+  static isAuthorized(
+    userId: number | string | undefined,
+    allowedUsers: Set<number>
+  ): boolean {
+    if (!userId || allowedUsers.size === 0) {
+      return false; // Fail closed if no users configured or ID missing
+    }
+    const numId = typeof userId === "number" ? userId : parseInt(String(userId).trim(), 10);
+    if (isNaN(numId) || numId <= 0) return false;
+    return allowedUsers.has(numId);
+  }
+
+  /**
+   * Enforces that development and control commands can only run in private chats.
+   * Group, supergroup, and channel chats are rejected.
+   */
+  static isPrivateChat(chatType?: string): boolean {
+    return chatType === "private";
   }
 
   static checkDangerous(text: string): SecurityCheckResult {

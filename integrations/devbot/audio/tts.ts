@@ -46,7 +46,8 @@ export class TtsService {
   }
 
   /**
-   * Synthesize text into an audio file (.ogg / .mp3) using edge-tts
+   * Synthesize text into an audio file (.ogg / .mp3) using edge-tts.
+   * Truthful error reporting, no silent failure.
    */
   static async synthesize(text: string, outputFilePath: string, voice?: string): Promise<boolean> {
     if (this.mockSynthesizer) {
@@ -75,6 +76,7 @@ export class TtsService {
             { bin: "python", args: ["-m", "edge_tts"] },
           ];
 
+    let lastError: any = null;
     for (const cand of candidates) {
       try {
         await execFileAsync(
@@ -99,14 +101,18 @@ export class TtsService {
           } catch {}
           return true;
         }
-      } catch {
-        // Try next candidate
+      } catch (err: any) {
+        lastError = err;
       }
     }
 
     try {
       if (fs.existsSync(tempTextPath)) fs.unlinkSync(tempTextPath);
     } catch {}
+
+    if (lastError) {
+      throw new Error(`TTS synthesis failed with edge-tts: ${lastError.message || lastError}`);
+    }
     return false;
   }
 
@@ -119,6 +125,7 @@ export class TtsService {
     authorName = "Владимир"
   ): Promise<string> {
     const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+    const model = (process.env.GEMINI_TTS_SCRIPT_MODEL || "gemini-2.0-flash").trim();
 
     if (apiKey) {
       try {
@@ -133,7 +140,7 @@ export class TtsService {
 
         const userPrompt = `Команда:\n«${commandText}»\n\nТехнический результат:\n${reportText.slice(0, 2000)}`;
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
         const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execSync } from "node:child_process";
 
 import { openStore } from "../../../runtime/queue/index.ts";
 import { TelegramClient } from "../client.ts";
@@ -11,17 +12,47 @@ import { SttService } from "../audio/stt.ts";
 import { TtsService } from "../audio/tts.ts";
 import { SecurityGuard } from "../security.ts";
 import { OutboxService } from "../outbox.ts";
+import { DevBotDb } from "../db.ts";
 import type { TelegramUpdate } from "../types.ts";
 
 function createTempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-test("1. update replay: deduplicates update_id and persists offset", async () => {
+test("1. atomic single-poller ownership & contention (Point 1)", () => {
+  const tmpDir = createTempDir("devbot-test-lock-");
+  const dbPath = path.join(tmpDir, "queue.db");
+  const db1 = new DevBotDb(dbPath);
+  const db2 = new DevBotDb(dbPath);
+
+  const botIdentity = "test_bot_123";
+  const ownerA = "poller-process-A";
+  const ownerB = "poller-process-B";
+
+  // Process A acquires lock
+  const acquiredA = db1.acquireLock(botIdentity, ownerA, 1111, 200);
+  assert.equal(acquiredA, true, "Процесс A должен захватить блокировку");
+
+  // Process B attempts to acquire -> fails closed
+  const acquiredB = db2.acquireLock(botIdentity, ownerB, 2222, 200);
+  assert.equal(acquiredB, false, "Процесс B должен получить отказ при живой блокировке A");
+
+  // Process A releases lock
+  db1.releaseLock(botIdentity, ownerA);
+
+  // Process B acquires now
+  const acquiredB2 = db2.acquireLock(botIdentity, ownerB, 2222, 200);
+  assert.equal(acquiredB2, true, "Процесс B должен захватить блокировку после освобождения A");
+
+  db1.close();
+  db2.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("2. durable SQLite inbox & update replay (Point 3)", async () => {
   const tmpDir = createTempDir("devbot-test-replay-");
   const dbPath = path.join(tmpDir, "queue.db");
   const store = openStore({ dbPath });
-
   store.registerProject({ id: "viewer", name: "Viewer 2", path: tmpDir });
 
   const sentMessages: any[] = [];
@@ -59,146 +90,161 @@ test("1. update replay: deduplicates update_id and persists offset", async () =>
   };
 
   const client = new TelegramClient({ token: "123:ABC", fetcher: mockFetch });
-  const gateway = new TelegramGateway(client, store, { dataDir: tmpDir, defaultProjectId: "viewer" });
+  const gateway = new TelegramGateway(client, store, {
+    dataDir: tmpDir,
+    defaultProjectId: "viewer",
+    allowedUsers: new Set([356165930]),
+  });
 
-  // First poll: processes update 101
+  // First poll: ingests into SQLite inbox and processes update 101
   const count1 = await gateway.pollOnce();
   assert.equal(count1, 1, "Первый проход должен обработать 1 обновление");
   assert.equal(store.list().length, 1, "Должно создаться ровно 1 задание в очереди");
   assert.equal(gateway.getOffset(), 102, "Offset должен сдвинуться на 102");
 
-  // Replay poll: same update 101 received again
+  // Replay poll: same update 101 received again -> ignored by SQLite inbox
   const count2 = await gateway.pollOnce();
   assert.equal(count2, 0, "Повторный проход должен проигнорировать дубликат update_id");
-  assert.equal(store.list().length, 1, "В очереди по-прежнему должно оставаться ровно 1 задание");
+  assert.equal(store.list().length, 1, "В очереди должно оставаться ровно 1 задание");
 
   store.close();
+  gateway.getDb().close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test("2. voice and photo ingestion via mock transports", async () => {
-  const tmpDir = createTempDir("devbot-test-media-");
+test("3. independent dangerous confirmations survive restart (Point 3)", async () => {
+  const tmpDir = createTempDir("devbot-test-conf-");
   const dbPath = path.join(tmpDir, "queue.db");
   const store = openStore({ dbPath });
-
   store.registerProject({ id: "viewer", name: "Viewer 2", path: tmpDir });
 
-  // Mock voice transcription
-  SttService.setMockTranscriber(async (buf, mime) => {
-    assert.ok(buf.length > 0, "Буфер аудио не должен быть пустым");
-    assert.equal(mime, "audio/ogg");
-    return "Голосовая задача через мок транскрибатор";
+  const devDb = new DevBotDb(path.join(tmpDir, "devbot.sqlite"));
+
+  // Save two independent dangerous confirmations
+  devDb.saveConfirmation({
+    id: "CONF-001",
+    chatId: 356165930,
+    userId: 356165930,
+    idempotencyKey: "key-1",
+    author: "Владимир",
+    text: "drop table users",
+    projectId: "viewer",
+    dangerReason: "Опасное удаление таблицы",
+    attachments: [],
+    createdAt: Date.now(),
+    status: "PENDING",
   });
 
-  const filesDownloaded: string[] = [];
-  const mockFetch = async (url: string | URL | Request): Promise<Response> => {
-    const urlStr = String(url);
-    if (urlStr.includes("getFile")) {
-      return new Response(
-        JSON.stringify({ ok: true, result: { file_path: "voice/file_123.oga" } }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
-    }
-    if (urlStr.includes("/file/bot")) {
-      filesDownloaded.push(urlStr);
-      return new Response(Buffer.from("FAKE_AUDIO_DATA"), { status: 200 });
-    }
-    if (urlStr.includes("sendChatAction") || urlStr.includes("sendMessage")) {
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
-    }
-    return new Response(JSON.stringify({ ok: true }), { status: 200 });
-  };
+  devDb.saveConfirmation({
+    id: "CONF-002",
+    chatId: 356165930,
+    userId: 356165930,
+    idempotencyKey: "key-2",
+    author: "Владимир",
+    text: "rm -rf /critical",
+    projectId: "viewer",
+    dangerReason: "Удаление файлов",
+    attachments: [],
+    createdAt: Date.now(),
+    status: "PENDING",
+  });
 
+  devDb.close();
+
+  // Simulate process restart: reopen DB with a fresh handlers instance
+  const reloadedDb = new DevBotDb(path.join(tmpDir, "devbot.sqlite"));
+  const mockFetch = async () => new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
   const client = new TelegramClient({ token: "123:ABC", fetcher: mockFetch });
-  const gateway = new TelegramGateway(client, store, { dataDir: tmpDir, defaultProjectId: "viewer" });
+  const gateway = new TelegramGateway(client, store, {
+    dataDir: tmpDir,
+    defaultProjectId: "viewer",
+    allowedUsers: new Set([356165930]),
+    db: reloadedDb,
+  });
 
-  const voiceUpdate: TelegramUpdate = {
-    update_id: 201,
-    message: {
-      message_id: 2,
-      date: 1000,
-      chat: { id: 356165930, type: "private" },
-      from: { id: 356165930, is_bot: false, first_name: "Владимир" },
-      voice: {
-        file_id: "voice_file_123",
-        file_unique_id: "uniq_123",
-        duration: 5,
-        mime_type: "audio/ogg",
-      },
+  // Verify both exist after restart
+  assert.ok(reloadedDb.getConfirmation("CONF-001"));
+  assert.ok(reloadedDb.getConfirmation("CONF-002"));
+
+  // Approve CONF-001
+  await gateway.getHandlers().handleUpdate({
+    update_id: 1,
+    callback_query: {
+      id: "cb_1",
+      from: { id: 356165930 },
+      data: "confirm_cmd_CONF-001",
+      message: { message_id: 10, chat: { id: 356165930 } },
     },
-  };
+  });
 
-  await gateway.getHandlers().handleUpdate(voiceUpdate);
+  assert.equal(store.list().length, 1, "CONF-001 создаёт задание после одобрения");
+  assert.equal(reloadedDb.getConfirmation("CONF-001")?.status, "APPROVED");
 
-  const tasks = store.list();
-  assert.equal(tasks.length, 1);
-  assert.equal(tasks[0].goal, "Голосовая задача через мок транскрибатор");
-  assert.equal(tasks[0].meta?.isVoice, true);
-  assert.equal(filesDownloaded.length, 1);
-
-  // Test photo ingestion
-  const photoUpdate: TelegramUpdate = {
-    update_id: 202,
-    message: {
-      message_id: 3,
-      date: 1000,
-      chat: { id: 356165930, type: "private" },
-      from: { id: 356165930, is_bot: false, first_name: "Владимир" },
-      caption: "Поправь дизайн по этому скрину",
-      photo: [
-        { file_id: "thumb_id", width: 100, height: 100 },
-        { file_id: "large_id", width: 800, height: 800 },
-      ],
+  // Cancel CONF-002
+  await gateway.getHandlers().handleUpdate({
+    update_id: 2,
+    callback_query: {
+      id: "cb_2",
+      from: { id: 356165930 },
+      data: "cancel_cmd_CONF-002",
+      message: { message_id: 11, chat: { id: 356165930 } },
     },
-  };
+  });
 
-  await gateway.getHandlers().handleUpdate(photoUpdate);
+  assert.equal(store.list().length, 1, "Отмена CONF-002 не создаёт второе задание");
+  assert.equal(reloadedDb.getConfirmation("CONF-002")?.status, "CANCELLED");
 
-  const tasks2 = store.list();
-  assert.equal(tasks2.length, 2);
-  const photoTask = tasks2.find((t) => t.id !== tasks[0].id);
-  assert.ok(photoTask);
-  assert.equal(photoTask?.goal, "Поправь дизайн по этому скрину");
-  const attachments = photoTask?.meta?.attachments as any[];
-  assert.ok(Array.isArray(attachments) && attachments.length === 1);
-  assert.equal(attachments[0].type, "photo");
-  assert.ok(fs.existsSync(attachments[0].filePath), "Файл фото должен быть сохранен на диск");
-
-  SttService.setMockTranscriber(null);
   store.close();
+  reloadedDb.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test("3. unknown project rejection and project routing", async () => {
-  const tmpDir = createTempDir("devbot-test-proj-");
+test("4. exact project routing: no substring guessing, rejects unknown (Point 4)", async () => {
+  const tmpDir = createTempDir("devbot-test-routing-");
   const dbPath = path.join(tmpDir, "queue.db");
   const store = openStore({ dbPath });
-
   store.registerProject({ id: "viewer", name: "Viewer 2", path: tmpDir });
   store.registerProject({ id: "crm", name: "Журнал CRM", path: tmpDir });
 
   const sentMessages: string[] = [];
-  const mockFetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    if (String(url).includes("sendMessage")) {
-      const body = JSON.parse(String(init?.body || "{}"));
-      sentMessages.push(body.text);
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
-    }
-    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  const mockFetch = async (_url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    if (body.text) sentMessages.push(body.text);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
   };
 
   const client = new TelegramClient({ token: "123:ABC", fetcher: mockFetch });
-  const gateway = new TelegramGateway(client, store, { dataDir: tmpDir, defaultProjectId: "viewer" });
+  const gateway = new TelegramGateway(client, store, {
+    dataDir: tmpDir,
+    defaultProjectId: "viewer",
+    allowedUsers: new Set([356165930]),
+  });
 
-  // Command for registered project crm
+  // A. Substring "crm" in natural text without prefix MUST remain in active project "viewer"
   await gateway.getHandlers().handleUpdate({
-    update_id: 301,
+    update_id: 1,
     message: {
       message_id: 10,
       date: 1000,
       chat: { id: 356165930, type: "private" },
       from: { id: 356165930, is_bot: false },
-      text: "в срм обнови список сотрудников",
+      text: "проверь интеграцию crm в коде viewer",
+    },
+  });
+
+  const viewerTasks = store.list({ projectId: "viewer" });
+  assert.equal(viewerTasks.length, 1, "Задача без явного префикса выполняется в активном проекте");
+  assert.equal(viewerTasks[0].projectId, "viewer");
+
+  // B. Explicit prefix /p crm routes to crm
+  await gateway.getHandlers().handleUpdate({
+    update_id: 2,
+    message: {
+      message_id: 11,
+      date: 1000,
+      chat: { id: 356165930, type: "private" },
+      from: { id: 356165930, is_bot: false },
+      text: "/p crm обнови список сотрудников",
     },
   });
 
@@ -206,190 +252,304 @@ test("3. unknown project rejection and project routing", async () => {
   assert.equal(crmTasks.length, 1);
   assert.equal(crmTasks[0].projectId, "crm");
 
-  // Unknown project test: dynamically change default to something unregistered
-  const handlers = gateway.getHandlers();
-  (handlers as any).activeProjectId = "nonexistent_proj";
-
-  await handlers.handleUpdate({
-    update_id: 302,
+  // C. Explicit unknown project /p unknown_foo rejects with error, NO fallback
+  sentMessages.length = 0;
+  await gateway.getHandlers().handleUpdate({
+    update_id: 3,
     message: {
-      message_id: 11,
+      message_id: 12,
       date: 1000,
       chat: { id: 356165930, type: "private" },
       from: { id: 356165930, is_bot: false },
-      text: "обычная задача",
+      text: "/p unknown_foo сделай что-нибудь",
     },
   });
 
+  assert.equal(store.list().length, 2, "Неизвестный проект не создает задания в очереди");
   assert.ok(
-    sentMessages.some((msg) => msg.includes("Неизвестный проект")),
-    "Должно прийти сообщение о неизвестном проекте"
+    sentMessages.some((m) => m.includes("не зарегистрирован")),
+    "Должно быть отправлено сообщение об ошибке незарегистрированного проекта"
   );
 
   store.close();
+  gateway.getDb().close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test("4. cancellation of dangerous commands (pending confirmation)", async () => {
-  const tmpDir = createTempDir("devbot-test-cancel-");
+test("5. private chat & numeric user ID enforcement (Point 4)", async () => {
+  const tmpDir = createTempDir("devbot-test-sec-");
   const dbPath = path.join(tmpDir, "queue.db");
   const store = openStore({ dbPath });
   store.registerProject({ id: "viewer", name: "Viewer 2", path: tmpDir });
 
-  let sentMarkup: any = null;
-  const mockFetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    if (String(url).includes("sendMessage") || String(url).includes("editMessageText")) {
-      const body = JSON.parse(String(init?.body || "{}"));
-      if (body.reply_markup) sentMarkup = body.reply_markup;
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
-    }
-    if (String(url).includes("answerCallbackQuery")) {
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
-    }
-    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  const sentMessages: string[] = [];
+  const mockFetch = async (_url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    if (body.text) sentMessages.push(body.text);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
   };
 
   const client = new TelegramClient({ token: "123:ABC", fetcher: mockFetch });
-  const gateway = new TelegramGateway(client, store, { dataDir: tmpDir, defaultProjectId: "viewer" });
+  const gateway = new TelegramGateway(client, store, {
+    dataDir: tmpDir,
+    defaultProjectId: "viewer",
+    allowedUsers: new Set([356165930]),
+  });
 
-  // 1. Send dangerous command: drop database
+  // Group chat attempt: dropped immediately
   await gateway.getHandlers().handleUpdate({
-    update_id: 401,
+    update_id: 1,
+    message: {
+      message_id: 10,
+      date: 1000,
+      chat: { id: -1001234567, type: "supergroup" },
+      from: { id: 356165930, is_bot: false },
+      text: "команда в группе",
+    },
+  });
+
+  assert.equal(store.list().length, 0, "Групповые сообщения не создают заданий");
+  assert.equal(sentMessages.length, 0, "В группу не отправляются ответы");
+
+  // Non-authorized numeric user ID attempt
+  await gateway.getHandlers().handleUpdate({
+    update_id: 2,
+    message: {
+      message_id: 11,
+      date: 1000,
+      chat: { id: 999999999, type: "private" },
+      from: { id: 999999999, is_bot: false },
+      text: "хакерская команда",
+    },
+  });
+
+  assert.equal(store.list().length, 0);
+  assert.ok(sentMessages.some((m) => m.includes("ДОСТУП ЗАПРЕЩЁН")));
+
+  store.close();
+  gateway.getDb().close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("6. file upload: UUID local name, safe basename, truthful STT failure (Point 6 & 7)", async () => {
+  const tmpDir = createTempDir("devbot-test-media-");
+  const dbPath = path.join(tmpDir, "queue.db");
+  const store = openStore({ dbPath });
+  store.registerProject({ id: "viewer", name: "Viewer 2", path: tmpDir });
+
+  let downloadUrl = "";
+  const mockFetch = async (url: string | URL | Request) => {
+    const urlStr = String(url);
+    if (urlStr.includes("getFile")) {
+      return new Response(JSON.stringify({ ok: true, result: { file_path: "docs/traversal.txt" } }), { status: 200 });
+    }
+    if (urlStr.includes("/file/bot")) {
+      downloadUrl = urlStr;
+      return new Response(Buffer.from("SAFE_DATA"), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+  };
+
+  const client = new TelegramClient({ token: "123:ABC", fetcher: mockFetch });
+  const gateway = new TelegramGateway(client, store, {
+    dataDir: tmpDir,
+    defaultProjectId: "viewer",
+    allowedUsers: new Set([356165930]),
+  });
+
+  // Document upload with path traversal in file_name
+  await gateway.getHandlers().handleUpdate({
+    update_id: 1,
     message: {
       message_id: 20,
       date: 1000,
       chat: { id: 356165930, type: "private" },
       from: { id: 356165930, is_bot: false },
-      text: "удалить базу данных и сбросить все таблицы",
+      caption: "Анализ документа",
+      document: {
+        file_id: "doc_123",
+        file_name: "../../../etc/passwd.txt",
+      },
     },
   });
 
-  // Check that task is NOT in SQLite store yet
-  assert.equal(store.list().length, 0, "Опасная команда не должна сразу попадать в очередь");
+  const tasks = store.list();
+  assert.equal(tasks.length, 1);
+  const attachments = tasks[0].meta?.attachments as any[];
+  assert.ok(attachments && attachments.length === 1);
+  // Display name is sanitized
+  assert.equal(attachments[0].fileName, "passwd.txt");
+  // Saved path is inside incomingDir with UUID
+  assert.ok(attachments[0].filePath.includes(tmpDir));
+  assert.ok(fs.existsSync(attachments[0].filePath));
 
-  // Check confirmation buttons
-  assert.ok(sentMarkup && sentMarkup.inline_keyboard);
-  const cancelBtn = sentMarkup.inline_keyboard[0].find((b: any) => b.callback_data?.startsWith("cancel_cmd_"));
-  assert.ok(cancelBtn, "Должна быть кнопка отмены");
+  // Test STT failure: does NOT queue empty/partial task
+  SttService.setMockTranscriber(async () => {
+    throw new Error("Quota exceeded 429");
+  });
 
-  // 2. User clicks Cancel
   await gateway.getHandlers().handleUpdate({
-    update_id: 402,
-    callback_query: {
-      id: "cb_1",
-      from: { id: 356165930 },
-      data: cancelBtn.callback_data,
-      message: { message_id: 21, chat: { id: 356165930 } },
+    update_id: 2,
+    message: {
+      message_id: 21,
+      date: 1000,
+      chat: { id: 356165930, type: "private" },
+      from: { id: 356165930, is_bot: false },
+      voice: { file_id: "v_123", file_unique_id: "uniq_v", duration: 3 },
     },
   });
 
-  assert.equal(store.list().length, 0, "После отмены задание не должно появиться в очереди");
-  assert.equal(gateway.getHandlers().getPendingConfirmations().size, 0);
+  assert.equal(store.list().length, 1, "При ошибке STT задача не должна создаваться");
 
+  SttService.setMockTranscriber(null);
   store.close();
+  gateway.getDb().close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test("5. outbox retries, voice failure resilience, and local defaults", async () => {
+test("7. durable outbox progress, text never resent on voice failure or restart (Point 2)", async () => {
   const tmpDir = createTempDir("devbot-test-outbox-");
   const dbPath = path.join(tmpDir, "queue.db");
   const store = openStore({ dbPath });
   store.registerProject({ id: "viewer", name: "Viewer 2", path: tmpDir });
 
-  let sendCount = 0;
-  let voiceAttempted = false;
-  let shouldFailText = false;
+  let textSends = 0;
+  let voiceSends = 0;
+  let failVoice = true;
 
-  const mockFetch = async (url: string | URL | Request): Promise<Response> => {
+  const mockFetch = async (url: string | URL | Request) => {
     const urlStr = String(url);
     if (urlStr.includes("sendMessage")) {
-      sendCount += 1;
-      if (shouldFailText) {
-        return new Response(JSON.stringify({ ok: false, description: "Network error" }), { status: 500 });
-      }
+      textSends += 1;
       return new Response(JSON.stringify({ ok: true, result: { message_id: 10 } }), { status: 200 });
     }
     if (urlStr.includes("sendVoice")) {
-      voiceAttempted = true;
-      return new Response(JSON.stringify({ ok: false, description: "Telegram voice error" }), { status: 500 });
+      voiceSends += 1;
+      if (failVoice) {
+        return new Response(JSON.stringify({ ok: false, description: "Voice error" }), { status: 500 });
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 11 } }), { status: 200 });
     }
     return new Response(JSON.stringify({ ok: true }), { status: 200 });
   };
 
   const client = new TelegramClient({ token: "123:ABC", fetcher: mockFetch });
-  const outbox = new OutboxService(client, store, { ttsCacheDir: path.join(tmpDir, "tts"), maxRetries: 3 });
-
-  // A. Local task test: notify.telegram = false -> store does not produce notifications, outbox delivers 0
-  const localTask = store.submit({
-    projectId: "viewer",
-    coordinatorId: "codex",
-    kind: "diagnostic",
-    title: "Локальный тест",
-    goal: "Проверка",
-    acceptance: [],
-    notify: { telegram: false },
+  const outbox = new OutboxService(client, store, {
+    dataDir: tmpDir,
+    ttsCacheDir: path.join(tmpDir, "tts"),
   });
 
-  store.claimNext({ projectId: "viewer", executorId: "antigravity", owner: "test-owner" });
-  store.report(localTask.id, "test-owner", {
-    summary: "Локальный отчёт",
-    changedFiles: [],
-    checks: [],
-    artifacts: [],
-    openQuestions: [],
+  TtsService.setMockSynthesizer(async (_text, outPath) => {
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, "OggS_FAKE_VOICE");
+    return true;
   });
 
-  const localRes = await outbox.deliverPending();
-  assert.equal(localRes.length, 0, "Локальные задачи без notify.telegram не создают уведомлений в outbox");
-  assert.equal(sendCount, 0, "Локальное задание не должно делать вызовов в Telegram");
-
-  // B. Telegram task with retry
-  const tgTask = store.submit({
+  const task = store.submit({
     projectId: "viewer",
     coordinatorId: "telegram",
     kind: "develop",
-    title: "Телеграм тест",
-    goal: "Сделай фичу",
+    title: "Тест доставки",
+    goal: "Проверить outbox",
     acceptance: [],
     notify: { telegram: true, tts: true, chatId: 356165930 },
   });
 
-  store.claimNext({ projectId: "viewer", executorId: "antigravity", owner: "test-owner-2" });
-  store.report(tgTask.id, "test-owner-2", {
-    summary: "Успешно сделано!",
+  store.claimNext({ projectId: "viewer", executorId: "antigravity", owner: "test-owner" });
+  store.report(task.id, "test-owner", {
+    summary: "Успешный отчёт",
     changedFiles: [],
     checks: [],
     artifacts: [],
     openQuestions: [],
   });
 
-  // First outbox pass: text fails
-  shouldFailText = true;
-  const failRes = await outbox.deliverPending();
-  assert.equal(failRes.length, 1);
-  assert.equal(failRes[0].textSent, false);
-  assert.ok(store.pendingNotifications().length > 0, "При ошибке уведомление должно оставаться в outbox");
+  // First pass: text succeeds, voice fails
+  const res1 = await outbox.deliverPending();
+  assert.equal(res1.length, 1);
+  assert.equal(res1[0].textSent, true);
+  assert.equal(res1[0].voiceSent, false);
+  assert.equal(textSends, 1);
+  assert.equal(voiceSends, 1);
+  assert.equal(store.pendingNotifications().length, 1, "Уведомление остается в очереди пока голос не сдан");
 
-  // Second pass: text succeeds, voice fails at Telegram transport level
-  shouldFailText = false;
-  TtsService.setMockSynthesizer(async (_text, outPath) => {
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    fs.writeFileSync(outPath, "FAKE_OGG_AUDIO");
-    return true;
+  // Reopen outbox service (simulate restart)
+  const outbox2 = new OutboxService(client, store, {
+    ttsCacheDir: path.join(tmpDir, "tts"),
+    db: outbox.getDb(),
   });
 
-  const succRes = await outbox.deliverPending();
-  assert.equal(succRes.length, 1);
-  assert.equal(succRes[0].textSent, true);
-  assert.equal(succRes[0].voiceSent, false);
-  assert.equal(voiceAttempted, true, "Синтез голоса должен быть вызван");
-  assert.equal(store.pendingNotifications().length, 0, "Уведомление должно быть помечено как отправленное");
+  // Reset retry deadline to allow immediate retry
+  outbox.getDb().updateOutboxProgress(res1[0].notificationId, { next_retry_at: 0 });
 
-  // Third pass: nothing pending
-  const emptyRes = await outbox.deliverPending();
-  assert.equal(emptyRes.length, 0);
+  // Voice now succeeds
+  failVoice = false;
+  const res2 = await outbox2.deliverPending();
+  assert.equal(res2.length, 1);
+  assert.equal(res2[0].textSent, true);
+  assert.equal(res2[0].voiceSent, true);
+  assert.equal(textSends, 1, "Текст НЕ должен отправляться повторно!");
+  assert.equal(voiceSends, 2, "Голос был повторен успешно");
+  assert.equal(store.pendingNotifications().length, 0, "После успешной отправки голоса уведомление снято");
 
   TtsService.setMockSynthesizer(null);
   store.close();
+  outbox.getDb().close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("8. idempotent migration CLI (Point 8)", () => {
+  const tmpDir = createTempDir("devbot-test-migrate-");
+  const dbPath = path.join(tmpDir, "queue.db");
+  const queuePath = path.join(tmpDir, "queue.json");
+  const projectsPath = path.join(tmpDir, "projects.json");
+
+  fs.writeFileSync(
+    projectsPath,
+    JSON.stringify({
+      projects: [{ id: "crm", name: "CRM", path: tmpDir, aliases: ["crm"] }],
+    })
+  );
+
+  fs.writeFileSync(
+    queuePath,
+    JSON.stringify({
+      commands: [
+        {
+          id: "CMD-001",
+          projectId: "crm",
+          text: "Миграционная задача",
+          status: "COMPLETED",
+          result: "Готово",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    })
+  );
+
+  // Run migration script
+  const migrateScript = path.resolve(__dirname, "../runner/migrate.ts");
+  const out = execSync(
+    `npx tsx "${migrateScript}" --queue="${queuePath}" --projects="${projectsPath}" --db="${dbPath}"`,
+    { encoding: "utf-8" }
+  );
+
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.imported, 1);
+  assert.equal(parsed.projects, 1);
+
+  // Second run: idempotent
+  const out2 = execSync(
+    `npx tsx "${migrateScript}" --queue="${queuePath}" --projects="${projectsPath}" --db="${dbPath}"`,
+    { encoding: "utf-8" }
+  );
+  const parsed2 = JSON.parse(out2);
+  assert.equal(parsed2.imported, 0, "Повторный запуск не дублирует импортированные команды");
+  assert.equal(parsed2.skipped, 1);
+
+  // Verify source files remain unchanged
+  assert.ok(fs.existsSync(queuePath));
+  assert.ok(fs.existsSync(projectsPath));
+
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });

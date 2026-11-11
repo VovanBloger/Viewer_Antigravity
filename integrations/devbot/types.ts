@@ -90,12 +90,16 @@ export interface DevBotAttachment {
 export interface PendingConfirmation {
   id: string;
   chatId: number;
+  userId: number;
+  idempotencyKey?: string;
   author: string;
   text: string;
   projectId: string;
   dangerReason: string;
+  dangerCategory?: "DATABASE" | "FILE_DELETION" | "CONFIG" | "DEPLOYMENT" | "GIT_FORCE" | string;
   attachments: DevBotAttachment[];
-  createdAt: string;
+  createdAt: number | string;
+  status?: "PENDING" | "APPROVED" | "CANCELLED" | "EXPIRED";
 }
 
 export interface OutboxDeliveryResult {

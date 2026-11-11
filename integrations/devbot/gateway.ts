@@ -1,31 +1,34 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash, randomBytes } from "node:crypto";
 import type { TelegramClient } from "./client.ts";
 import { BotHandlers } from "./handlers.ts";
 import { OutboxService } from "./outbox.ts";
 import { getDevBotSettings, ensureDevBotDirectories, registerDefaultProjects } from "./config.ts";
 import type { SqliteTaskStore } from "../../runtime/queue/store.ts";
+import { DevBotDb } from "./db.ts";
 
 export interface GatewayOptions {
   dataDir?: string;
   defaultProjectId?: string;
-  allowedUsers?: Set<string>;
+  allowedUsers?: Set<number>;
   configPath?: string;
   pollTimeout?: number;
+  db?: DevBotDb;
 }
 
 export class TelegramGateway {
   private client: TelegramClient;
   private store: SqliteTaskStore;
+  private db: DevBotDb;
   private handlers: BotHandlers;
   private outbox: OutboxService;
   private dataDir: string;
-  private lockFile: string;
-  private offsetFile: string;
   private isRunning = false;
-  private processedUpdates: Set<number> = new Set();
-  private maxSeenUpdates = 5000;
   private pollTimeout: number;
+  private botIdentity: string;
+  private pollerOwnerId: string;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
 
   constructor(client: TelegramClient, store: SqliteTaskStore, options?: GatewayOptions) {
     this.client = client;
@@ -35,24 +38,35 @@ export class TelegramGateway {
     ensureDevBotDirectories(settings);
 
     this.dataDir = settings.dataDir;
-    this.lockFile = path.join(settings.lockDir, "dev-bot.lock");
-    this.offsetFile = path.join(settings.dataDir, "update_offset.json");
     this.pollTimeout = options?.pollTimeout ?? 25;
+    this.db = options?.db || new DevBotDb(path.join(this.dataDir, "devbot.sqlite"));
 
-    // Register default projects in store if not present
+    // Register default projects in store
     registerDefaultProjects(store, options?.configPath);
 
     this.handlers = new BotHandlers(client, store, {
       dataDir: this.dataDir,
       defaultProjectId: options?.defaultProjectId || settings.defaultProjectId,
       allowedUsers: options?.allowedUsers || settings.allowedUsers,
+      db: this.db,
     });
 
     this.outbox = new OutboxService(client, store, {
       ttsCacheDir: settings.ttsCacheDir,
+      db: this.db,
     });
 
-    this.loadState();
+    // Derive stable bot identity bound to token
+    const rawToken = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
+    this.botIdentity = rawToken
+      ? createHash("sha256").update(rawToken).digest("hex").slice(0, 16)
+      : "devbot_default";
+
+    this.pollerOwnerId = `poller-${process.pid}-${randomBytes(4).toString("hex")}`;
+  }
+
+  getDb(): DevBotDb {
+    return this.db;
   }
 
   getHandlers(): BotHandlers {
@@ -63,114 +77,58 @@ export class TelegramGateway {
     return this.outbox;
   }
 
-  private loadState(): void {
-    try {
-      if (fs.existsSync(this.offsetFile)) {
-        const raw = fs.readFileSync(this.offsetFile, "utf-8");
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed.seen)) {
-          for (const id of parsed.seen) {
-            if (typeof id === "number") this.processedUpdates.add(id);
-          }
-        }
-      }
-    } catch {
-      // Ignore initial state read errors
-    }
-  }
-
-  private saveState(offset: number): void {
-    try {
-      // Keep seen updates bounded to prevent memory growth
-      const seenArray = Array.from(this.processedUpdates).slice(-this.maxSeenUpdates);
-      fs.writeFileSync(
-        this.offsetFile,
-        JSON.stringify({ offset, seen: seenArray, updatedAt: new Date().toISOString() }, null, 2),
-        "utf-8"
-      );
-    } catch (e: any) {
-      console.warn("[TelegramGateway] Warning: failed to save offset state:", e.message || e);
-    }
-  }
-
   getOffset(): number {
-    try {
-      if (fs.existsSync(this.offsetFile)) {
-        const raw = fs.readFileSync(this.offsetFile, "utf-8");
-        const parsed = JSON.parse(raw);
-        if (typeof parsed.offset === "number") return parsed.offset;
-      }
-    } catch {}
-    return 0;
+    return this.db.getCursorOffset(this.botIdentity);
   }
+
+  // =========================================================================
+  // Atomic Single-Poller Lock (Point 1: Fail-closed, DB-bound)
+  // =========================================================================
 
   checkSingleInstance(): boolean {
-    try {
-      if (fs.existsSync(this.lockFile)) {
-        const pidStr = fs.readFileSync(this.lockFile, "utf-8").trim();
-        const pid = parseInt(pidStr, 10);
-        if (!isNaN(pid) && pid !== process.pid) {
-          try {
-            process.kill(pid, 0);
-            return false; // Already running alive process
-          } catch {
-            // Stale lock
-          }
-        }
-      }
-      fs.mkdirSync(path.dirname(this.lockFile), { recursive: true });
-      fs.writeFileSync(this.lockFile, String(process.pid), "utf-8");
-      return true;
-    } catch {
-      return true;
-    }
+    return this.db.acquireLock(this.botIdentity, this.pollerOwnerId, process.pid, 30_000);
   }
 
   cleanupLock(): void {
-    try {
-      if (fs.existsSync(this.lockFile)) {
-        const pid = parseInt(fs.readFileSync(this.lockFile, "utf-8").trim(), 10);
-        if (pid === process.pid) {
-          fs.unlinkSync(this.lockFile);
-        }
-      }
-    } catch {}
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    this.db.releaseLock(this.botIdentity, this.pollerOwnerId);
   }
 
   /**
-   * Run a single poll iteration: get updates, dedup, dispatch to handlers, deliver outbox.
-   * Returns count of newly processed updates.
+   * Run a single poll iteration:
+   * 1. Fetches updates from Telegram using cursor from DB.
+   * 2. Durably commits updates to SQLite inbox and updates cursor atomically.
+   * 3. Dispatches pending inbox updates to handlers.
+   * 4. Delivers pending outbox notifications with chunk/retry progress.
    */
   async pollOnce(): Promise<number> {
-    let offset = this.getOffset();
+    const offset = this.getOffset();
     const updates = await this.client.getUpdates(offset, 50, this.pollTimeout);
 
-    let processedCount = 0;
-    for (const update of updates) {
-      if (update.update_id >= offset) {
-        offset = update.update_id + 1;
-      }
-
-      // Strict update_id deduplication
-      if (this.processedUpdates.has(update.update_id)) {
-        continue;
-      }
-
-      this.processedUpdates.add(update.update_id);
-      processedCount += 1;
-
-      try {
-        await this.handlers.handleUpdate(update);
-      } catch (err: any) {
-        console.error(`[TelegramGateway] Error handling update ${update.update_id}:`, err.message || err);
-      }
-    }
-
+    // 1. Ingest into SQLite inbox durably (cursor is updated inside transaction)
     if (updates.length > 0) {
-      this.saveState(offset);
+      this.db.ingestInboundUpdates(updates, this.botIdentity);
     }
 
-    // Process outbox delivery
+    // 2. Process all pending updates from SQLite inbox FIFO
+    const pending = this.db.getPendingInboxUpdates(50);
+    let processedCount = 0;
+
+    for (const item of pending) {
+      try {
+        await this.handlers.handleUpdate(item.payload);
+        this.db.markUpdateProcessed(item.update_id);
+        processedCount += 1;
+      } catch (err: any) {
+        console.error(`[TelegramGateway] Error handling update ${item.update_id}:`, err.message || err);
+        this.db.markUpdateFailed(item.update_id, err.message || String(err));
+      }
+    }
+
+    // 3. Process persistent outbox delivery
     try {
       await this.outbox.deliverPending();
     } catch (outboxErr: any) {
@@ -182,21 +140,25 @@ export class TelegramGateway {
 
   async start(): Promise<void> {
     if (!this.checkSingleInstance()) {
-      console.log(`ℹ️ [TelegramGateway] Бот уже запущен в системе. Завершаю повторный процесс.`);
+      console.error(`[TelegramGateway] Ошибка: другой процесс уже держит активный шлюз (bot: ${this.botIdentity}). Завершаю работу (fail-closed).`);
       return;
     }
 
     this.isRunning = true;
 
+    // Start background poller heartbeat
+    this.heartbeatTimer = setInterval(() => {
+      this.db.heartbeatLock(this.botIdentity, this.pollerOwnerId, 30_000);
+    }, 10_000);
+
+    const onShutdown = () => {
+      this.stop();
+      process.exit(0);
+    };
+
     process.on("exit", () => this.cleanupLock());
-    process.on("SIGINT", () => {
-      this.cleanupLock();
-      process.exit(0);
-    });
-    process.on("SIGTERM", () => {
-      this.cleanupLock();
-      process.exit(0);
-    });
+    process.on("SIGINT", onShutdown);
+    process.on("SIGTERM", onShutdown);
 
     console.log("==================================================");
     console.log("🚀 ЗАПУСК VIEWER 2 TELEGRAM GATEWAY (SQLITE QUEUE)");

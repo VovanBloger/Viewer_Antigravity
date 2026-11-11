@@ -1,28 +1,30 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { TelegramClient } from "./client.ts";
 import type { DevBotAttachment, PendingConfirmation, TelegramUpdate } from "./types.ts";
-import { SecurityGuard } from "./security.ts";
+import { SecurityGuard, escapeHtml } from "./security.ts";
 import { Keyboards } from "./keyboards.ts";
 import { SttService } from "./audio/stt.ts";
 import { getDevBotSettings, ensureDevBotDirectories } from "./config.ts";
 import type { SqliteTaskStore } from "../../runtime/queue/store.ts";
+import { DevBotDb } from "./db.ts";
 
 export interface BotHandlersOptions {
   dataDir?: string;
   defaultProjectId?: string;
-  allowedUsers?: Set<string>;
+  allowedUsers?: Set<number>;
+  db?: DevBotDb;
 }
 
 export class BotHandlers {
   private client: TelegramClient;
   private store: SqliteTaskStore;
+  private db: DevBotDb;
   private dataDir: string;
   private incomingDir: string;
-  private allowedUsers: Set<string>;
-  private activeProjectId: string;
-  private pendingConfirmations: Map<string, PendingConfirmation> = new Map();
-  private confirmationCounter = 0;
+  private allowedUsers: Set<number>;
+  private defaultProjectId: string;
 
   constructor(client: TelegramClient, store: SqliteTaskStore, options?: BotHandlersOptions) {
     this.client = client;
@@ -34,22 +36,29 @@ export class BotHandlers {
     this.dataDir = settings.dataDir;
     this.incomingDir = settings.incomingDir;
     this.allowedUsers = options?.allowedUsers || settings.allowedUsers;
-    this.activeProjectId = (options?.defaultProjectId || settings.defaultProjectId || "viewer").toLowerCase();
+    this.defaultProjectId = (options?.defaultProjectId || settings.defaultProjectId || "viewer").toLowerCase();
+    this.db = options?.db || new DevBotDb(path.join(this.dataDir, "devbot.sqlite"));
   }
 
-  getActiveProjectId(): string {
-    return this.activeProjectId;
+  getDb(): DevBotDb {
+    return this.db;
   }
 
-  setActiveProjectId(id: string): boolean {
+  getActiveProjectId(chatId?: number): string {
+    if (chatId) {
+      const persisted = this.db.getSelectedProject(chatId);
+      if (persisted && this.store.getProject(persisted)) {
+        return persisted;
+      }
+    }
+    return this.defaultProjectId;
+  }
+
+  setActiveProjectId(chatId: number, userId: number, id: string): boolean {
     const project = this.store.getProject(id);
     if (!project) return false;
-    this.activeProjectId = project.id;
+    this.db.setSelectedProject(chatId, userId, project.id);
     return true;
-  }
-
-  getPendingConfirmations(): Map<string, PendingConfirmation> {
-    return this.pendingConfirmations;
   }
 
   async handleUpdate(update: TelegramUpdate): Promise<void> {
@@ -66,36 +75,38 @@ export class BotHandlers {
 
   private async handleCallback(cb: NonNullable<TelegramUpdate["callback_query"]>): Promise<void> {
     const chatId = cb.message?.chat.id || cb.from.id;
+    const fromId = cb.from.id;
     const messageId = cb.message?.message_id;
     const data = cb.data || "";
 
     await this.client.answerCallbackQuery(cb.id);
 
-    if (!SecurityGuard.isAuthorized(cb.from.id, cb.from.username, this.allowedUsers)) {
+    // Strict numeric ID authorization check
+    if (!SecurityGuard.isAuthorized(fromId, this.allowedUsers)) {
       await this.client.sendMessage(chatId, "⛔ У вас нет доступа к управлению этим ботом разработчика.");
       return;
     }
 
     // 1. Project Selection: proj_select_<id>
     if (data.startsWith("proj_select_")) {
-      const projId = data.replace("proj_select_", "");
+      const projId = data.replace("proj_select_", "").trim().toLowerCase();
       const project = this.store.getProject(projId);
       if (project) {
-        this.activeProjectId = project.id;
+        this.setActiveProjectId(chatId, fromId, project.id);
         const text =
           `🎯 <b>АКТИВНЫЙ ПРОЕКТ ИЗМЕНЁН:</b>\n\n` +
-          `📁 <b>${project.name}</b> (<code>${project.id}</code>)\n` +
-          `Путь: <code>${project.path}</code>\n\n` +
+          `📁 <b>${escapeHtml(project.name)}</b> (<code>${escapeHtml(project.id)}</code>)\n` +
+          `Путь: <code>${escapeHtml(project.path)}</code>\n\n` +
           `Все последующие задачи будут выполняться в контексте этого проекта.`;
 
-        const keyboard = Keyboards.getProjectsInline(this.store.listProjects(), this.activeProjectId);
+        const keyboard = Keyboards.getProjectsInline(this.store.listProjects(), project.id);
         if (messageId) {
           await this.client.editMessageText(chatId, messageId, text, { reply_markup: keyboard });
         } else {
           await this.client.sendMessage(chatId, text, { reply_markup: keyboard });
         }
       } else {
-        await this.client.sendMessage(chatId, `⚠️ Проект "${projId}" не найден в реестре.`);
+        await this.client.sendMessage(chatId, `⚠️ Проект "${escapeHtml(projId)}" не найден в реестре.`);
       }
       return;
     }
@@ -103,13 +114,19 @@ export class BotHandlers {
     // 2. Confirmation YES: confirm_cmd_<id>
     if (data.startsWith("confirm_cmd_")) {
       const confId = data.replace("confirm_cmd_", "");
-      const pending = this.pendingConfirmations.get(confId);
-      if (!pending) {
-        await this.client.sendMessage(chatId, `⚠️ Подтверждение #${confId} не найдено или уже было обработано.`);
+      const pending = this.db.getConfirmation(confId);
+      if (!pending || pending.status !== "PENDING") {
+        await this.client.sendMessage(chatId, `⚠️ Подтверждение #${escapeHtml(confId)} не найдено или уже было обработано.`);
         return;
       }
 
-      this.pendingConfirmations.delete(confId);
+      // Security check: bind confirmation to original user and chat
+      if (pending.userId !== fromId || pending.chatId !== chatId) {
+        await this.client.sendMessage(chatId, "⛔ Подтвердить операцию может только пользователь, отдавший команду в исходном чате.");
+        return;
+      }
+
+      this.db.updateConfirmationStatus(confId, "APPROVED");
 
       const task = this.store.submit({
         projectId: pending.projectId,
@@ -135,8 +152,8 @@ export class BotHandlers {
 
       const text =
         `✅ <b>ОПЕРАЦИЯ ПОДТВЕРЖДЕНА!</b>\n\n` +
-        `🆔 Задание: <code>#${task.id}</code> (${task.projectId})\n` +
-        `📝 <b>Задача:</b> <i>«${pending.text}»</i>\n\n` +
+        `🆔 Задание: <code>#${task.id}</code> (${escapeHtml(task.projectId)})\n` +
+        `📝 <b>Задача:</b> <i>«${escapeHtml(pending.text)}»</i>\n\n` +
         `🚀 Передано в очередь на выполнение.`;
 
       if (messageId) {
@@ -150,9 +167,13 @@ export class BotHandlers {
     // 3. Confirmation NO: cancel_cmd_<id>
     if (data.startsWith("cancel_cmd_")) {
       const confId = data.replace("cancel_cmd_", "");
-      const pending = this.pendingConfirmations.get(confId);
+      const pending = this.db.getConfirmation(confId);
       if (pending) {
-        this.pendingConfirmations.delete(confId);
+        if (pending.userId !== fromId || pending.chatId !== chatId) {
+          await this.client.sendMessage(chatId, "⛔ Отменить операцию может только автор команды.");
+          return;
+        }
+        this.db.updateConfirmationStatus(confId, "CANCELLED");
       }
       const text = `❌ <b>ОПЕРАЦИЯ ОТМЕНЕНА</b>\nКоманда снята с выполнения.`;
       if (messageId) {
@@ -166,81 +187,112 @@ export class BotHandlers {
 
   private async handleMessage(msg: NonNullable<TelegramUpdate["message"]>): Promise<void> {
     const chatId = msg.chat.id;
-    const fromId = msg.from?.id || chatId;
+    const fromId = msg.from?.id;
     const author = msg.from?.first_name || msg.from?.username || "Владимир";
 
-    if (!SecurityGuard.isAuthorized(fromId, msg.from?.username, this.allowedUsers)) {
+    // Enforce private chats only (Point 4)
+    if (!SecurityGuard.isPrivateChat(msg.chat.type)) {
+      return; // Silently drop or ignore group messages to prevent leakage
+    }
+
+    // Enforce numeric user ID authorization (Point 4)
+    if (!SecurityGuard.isAuthorized(fromId, this.allowedUsers)) {
       await this.client.sendMessage(
         chatId,
-        `⛔ <b>ДОСТУП ЗАПРЕЩЁН</b>\n\nЭтот бот предназначен исключительно для авторизованных разработчиков.\nВаш ID: <code>${fromId}</code>`
+        `⛔ <b>ДОСТУП ЗАПРЕЩЁН</b>\n\nЭтот бот предназначен исключительно для авторизованных разработчиков.\nВаш ID: <code>${fromId ?? "неизвестно"}</code>`
       );
       return;
     }
 
+    const currentActiveProject = this.getActiveProjectId(chatId);
     let text = (msg.text || msg.caption || "").trim();
-    let isVoice = false;
 
     // Handle voice / audio notes
     const voiceObj = msg.voice || msg.audio;
     if (voiceObj && voiceObj.file_id) {
-      isVoice = true;
       await this.client.sendChatAction(chatId, "record_voice");
 
       try {
         const fileInfo = await this.client.getFile(voiceObj.file_id);
-        if (fileInfo.ok && fileInfo.result?.file_path) {
-          const buffer = await this.client.downloadFile(fileInfo.result.file_path);
-          const mimeType = ("mime_type" in voiceObj && voiceObj.mime_type) ? voiceObj.mime_type : "audio/ogg";
-          const transcribed = await SttService.transcribe(buffer, mimeType);
+        if (!fileInfo.ok || !fileInfo.result?.file_path) {
+          throw new Error(fileInfo.description || fileInfo.error || "Не удалось получить метаданные аудиофайла");
+        }
 
-          if (transcribed && transcribed.trim()) {
-            text = transcribed.trim();
-          } else {
-            await this.client.sendMessage(
-              chatId,
-              "⚠️ Не удалось разобрать слова в аудиосообщении. Пожалуйста, напишите команду текстом."
-            );
-            return;
-          }
+        const buffer = await this.client.downloadFile(fileInfo.result.file_path);
+        const mimeType = ("mime_type" in voiceObj && voiceObj.mime_type) ? voiceObj.mime_type : "audio/ogg";
+        const transcribed = await SttService.transcribe(buffer, mimeType);
+
+        if (transcribed && transcribed.trim()) {
+          text = transcribed.trim();
+        } else {
+          await this.client.sendMessage(
+            chatId,
+            "⚠️ Не удалось разобрать слова в аудиосообщении. Пожалуйста, напишите команду текстом."
+          );
+          return;
         }
       } catch (err: any) {
-        await this.client.sendMessage(chatId, `⚠️ Ошибка распознавания речи: ${err.message || err}`);
+        await this.client.sendMessage(chatId, `⚠️ Ошибка распознавания речи: ${escapeHtml(err.message || err)}`);
         return;
       }
     }
 
-    // Handle documents / photos
+    // Handle documents / photos (Point 6: UUID names, safe display names, bounded size)
     const attachments: DevBotAttachment[] = [];
     if (msg.photo && msg.photo.length > 0) {
       try {
         const largestPhoto = msg.photo[msg.photo.length - 1];
         const fileInfo = await this.client.getFile(largestPhoto.file_id);
-        if (fileInfo.ok && fileInfo.result?.file_path) {
-          const buffer = await this.client.downloadFile(fileInfo.result.file_path);
-          const filename = `photo_${Date.now()}.jpg`;
-          const savePath = path.join(this.incomingDir, filename);
-          fs.writeFileSync(savePath, buffer);
-          attachments.push({ type: "photo", filePath: savePath, fileName: filename });
-          if (!text) text = `[Анализ скриншота/фото: ${filename}]`;
+        if (!fileInfo.ok || !fileInfo.result?.file_path) {
+          throw new Error(fileInfo.description || fileInfo.error || "Не удалось получить фото");
         }
+
+        const buffer = await this.client.downloadFile(fileInfo.result.file_path);
+        const uuid = randomUUID();
+        const savedFileName = `photo_${uuid}.jpg`;
+        const savePath = path.join(this.incomingDir, savedFileName);
+        fs.writeFileSync(savePath, buffer);
+
+        attachments.push({
+          type: "photo",
+          filePath: savePath,
+          fileName: "photo.jpg",
+        });
+
+        if (!text) text = `[Анализ скриншота/фото: photo.jpg]`;
       } catch (e: any) {
-        console.warn("[BotHandlers] Photo download error:", e.message || e);
+        await this.client.sendMessage(chatId, `⚠️ Ошибка загрузки изображения: ${escapeHtml(e.message || e)}`);
+        return;
       }
     }
 
     if (msg.document && msg.document.file_id) {
       try {
         const fileInfo = await this.client.getFile(msg.document.file_id);
-        if (fileInfo.ok && fileInfo.result?.file_path) {
-          const buffer = await this.client.downloadFile(fileInfo.result.file_path);
-          const filename = msg.document.file_name || `doc_${Date.now()}`;
-          const savePath = path.join(this.incomingDir, filename);
-          fs.writeFileSync(savePath, buffer);
-          attachments.push({ type: "document", filePath: savePath, fileName: filename });
-          if (!text) text = `[Файл: ${filename}]`;
+        if (!fileInfo.ok || !fileInfo.result?.file_path) {
+          throw new Error(fileInfo.description || fileInfo.error || "Не удалось получить документ");
         }
+
+        const buffer = await this.client.downloadFile(fileInfo.result.file_path);
+        const rawName = msg.document.file_name || "document.bin";
+        // Sanitize display name against path traversal
+        const safeDisplayName = path.basename(rawName).replace(/[^\w.-]/g, "_");
+        const ext = path.extname(safeDisplayName) || ".bin";
+        const uuid = randomUUID();
+        const savedFileName = `doc_${uuid}${ext}`;
+        const savePath = path.join(this.incomingDir, savedFileName);
+        fs.writeFileSync(savePath, buffer);
+
+        attachments.push({
+          type: "document",
+          filePath: savePath,
+          fileName: safeDisplayName,
+        });
+
+        if (!text) text = `[Файл: ${safeDisplayName}]`;
       } catch (e: any) {
-        console.warn("[BotHandlers] Document download error:", e.message || e);
+        await this.client.sendMessage(chatId, `⚠️ Ошибка загрузки документа: ${escapeHtml(e.message || e)}`);
+        return;
       }
     }
 
@@ -248,15 +300,15 @@ export class BotHandlers {
 
     // Command: /start
     if (text === "/start") {
-      const active = this.store.getProject(this.activeProjectId) || { id: this.activeProjectId, name: this.activeProjectId, path: "." };
+      const active = this.store.getProject(currentActiveProject) || { id: currentActiveProject, name: currentActiveProject, path: "." };
       const welcome =
         `🤖 <b>Antigravity AI Developer Bot (Viewer 2)</b>\n\n` +
-        `Здравствуйте, <b>${author}</b>! Я ваш персональный автономный бот разработки на базе SQLite-очереди Viewer.\n\n` +
-        `🎯 <b>Текущий проект:</b> <b>${active.name}</b> (<code>${active.id}</code>)\n` +
-        `📁 <i>Путь: <code>${active.path}</code></i>\n\n` +
+        `Здравствуйте, <b>${escapeHtml(author)}</b>! Я ваш персональный автономный бот разработки на базе SQLite-очереди Viewer.\n\n` +
+        `🎯 <b>Текущий проект:</b> <b>${escapeHtml(active.name)}</b> (<code>${escapeHtml(active.id)}</code>)\n` +
+        `📁 <i>Путь: <code>${escapeHtml(active.path)}</code></i>\n\n` +
         `<b>Как мной управлять:</b>\n` +
         `• <b>Голосом:</b> отправьте голосовое сообщение с задачей — я расшифрую и передам в Antigravity;\n` +
-        `• <b>Текстом:</b> напишите любую задачу («исправь шапку», «добавь узел в VPN»);\n` +
+        `• <b>Текстом:</b> напишите задачу или используйте точный префикс (<code>/p crm ...</code>, <code>/p viewer ...</code>);\n` +
         `• <b>Файлами/скриншотами:</b> пришлите картинку с комментарием;\n` +
         `• <b>Смена проекта:</b> нажмите «📂 Выбрать проект» ниже.\n\n` +
         `<i>Все сервисы готовы к работе!</i>`;
@@ -265,25 +317,58 @@ export class BotHandlers {
         reply_markup: Keyboards.getMainReply(),
       });
       await this.client.sendMessage(chatId, `Выберите активный проект для работы:`, {
-        reply_markup: Keyboards.getProjectsInline(this.store.listProjects(), this.activeProjectId),
+        reply_markup: Keyboards.getProjectsInline(this.store.listProjects(), currentActiveProject),
       });
       return;
     }
 
     // Command: /projects or "📂 Выбрать проект"
-    if (text === "/projects" || text === "📂 Выбрать проект" || text === "/project") {
-      const active = this.store.getProject(this.activeProjectId) || { id: this.activeProjectId, name: this.activeProjectId };
+    if (text === "/projects" || text === "📂 Выбрать проект") {
+      const active = this.store.getProject(currentActiveProject) || { id: currentActiveProject, name: currentActiveProject };
       await this.client.sendMessage(
         chatId,
-        `📂 <b>ВЫБОР АКТИВНОГО ПРОЕКТА</b>\n\nТекущий выбранный: <b>${active.name}</b> (<code>${active.id}</code>)\n\nНажмите на проект для переключения:`,
-        { reply_markup: Keyboards.getProjectsInline(this.store.listProjects(), this.activeProjectId) }
+        `📂 <b>ВЫБОР АКТИВНОГО ПРОЕКТА</b>\n\nТекущий выбранный: <b>${escapeHtml(active.name)}</b> (<code>${escapeHtml(active.id)}</code>)\n\nНажмите на проект для переключения:`,
+        { reply_markup: Keyboards.getProjectsInline(this.store.listProjects(), currentActiveProject) }
+      );
+      return;
+    }
+
+    // Command: /project <exact-id> or /project (without args)
+    if (text.startsWith("/project")) {
+      const parts = text.split(/\s+/);
+      if (parts.length === 1) {
+        // Just /project -> show selection
+        const active = this.store.getProject(currentActiveProject) || { id: currentActiveProject, name: currentActiveProject };
+        await this.client.sendMessage(
+          chatId,
+          `📂 <b>ВЫБОР АКТИВНОГО ПРОЕКТА</b>\n\nТекущий выбранный: <b>${escapeHtml(active.name)}</b> (<code>${escapeHtml(active.id)}</code>)\n\nНажмите на проект для переключения:`,
+          { reply_markup: Keyboards.getProjectsInline(this.store.listProjects(), currentActiveProject) }
+        );
+        return;
+      }
+
+      const requestedId = parts[1].toLowerCase().trim();
+      const proj = this.store.getProject(requestedId);
+      if (!proj) {
+        const available = this.store.listProjects().map((p) => `<code>${escapeHtml(p.id)}</code>`).join(", ");
+        await this.client.sendMessage(
+          chatId,
+          `⚠️ Проект «${escapeHtml(requestedId)}» не найден в реестре.\nДоступные проекты: ${available}`
+        );
+        return;
+      }
+
+      this.setActiveProjectId(chatId, fromId!, proj.id);
+      await this.client.sendMessage(
+        chatId,
+        `🎯 Активный проект изменён на <b>${escapeHtml(proj.name)}</b> (<code>${escapeHtml(proj.id)}</code>)`
       );
       return;
     }
 
     // Command: /status or "📊 Статус системы"
     if (text === "/status" || text === "📊 Статус системы") {
-      const active = this.store.getProject(this.activeProjectId) || { id: this.activeProjectId, name: this.activeProjectId, path: "." };
+      const active = this.store.getProject(currentActiveProject) || { id: currentActiveProject, name: currentActiveProject, path: "." };
       const allTasks = this.store.list();
       const queuedCount = allTasks.filter((t) => t.status === "QUEUED").length;
       const inProgressCount = allTasks.filter((t) => t.status === "IN_PROGRESS").length;
@@ -292,8 +377,8 @@ export class BotHandlers {
 
       const statusMsg =
         `📊 <b>СТАТУС DEV BOT & ОЧЕРЕДИ VIEWER</b>\n\n` +
-        `🎯 <b>Выбранный проект:</b> <b>${active.name}</b> (<code>${active.id}</code>)\n` +
-        `📁 <i>Каталог: <code>${active.path}</code></i>\n\n` +
+        `🎯 <b>Выбранный проект:</b> <b>${escapeHtml(active.name)}</b> (<code>${escapeHtml(active.id)}</code>)\n` +
+        `📁 <i>Каталог: <code>${escapeHtml(active.path)}</code></i>\n\n` +
         `📥 <b>В очереди (QUEUED):</b> ${queuedCount}\n` +
         `⚙️ <b>В работе (IN_PROGRESS):</b> ${inProgressCount}\n` +
         `📋 <b>Сдано отчётов (REPORTED):</b> ${reportedCount}\n` +
@@ -308,111 +393,76 @@ export class BotHandlers {
     if (text === "/help" || text === "❓ Справка") {
       const helpMsg =
         `📖 <b>СПРАВКА ПО УПРАВЛЕНИЮ РАЗРАБОТКОЙ</b>\n\n` +
-        `• <b>Постановка задачи:</b> просто продиктуйте или напишите суть задачи.\n` +
-        `• <b>Автоопределение проектов:</b> если в тексте упомянут проект («в впн добавь...» или «в срм исправь...»), задача автоматически привязывается к нужному проекту!\n` +
-        `• <b>Опасные команды:</b> при операциях с базами данных, удалением файлов или деплоем бот запросит явное подтверждение кнопкой.\n` +
+        `• <b>Постановка задачи:</b> просто продиктуйте или напишите суть задачи;\n` +
+        `• <b>Точная маршрутизация:</b> используйте <code>/p &lt;проект&gt; &lt;задача&gt;</code> для разовой адресации без смены активного проекта;\n` +
+        `• <b>Смена проекта:</b> <code>/project &lt;id&gt;</code> или кнопка «📂 Выбрать проект»;\n` +
+        `• <b>Опасные команды:</b> при операциях с базами данных, удалением файлов или деплоем бот запросит подтверждение кнопкой;\n` +
         `• <b>Голосовые отчёты:</b> после выполнения задачи бот пришлёт голосовое резюме отчёта и подробный технический текст.`;
       await this.client.sendMessage(chatId, helpMsg);
       return;
     }
 
-    // Detect target project from text or fallback to active
-    let targetProjectId = this.activeProjectId;
-    const lower = text.toLowerCase();
+    // =========================================================================
+    // Exact Project Routing (Point 4: NO substring guessing!)
+    // =========================================================================
+    let targetProjectId = currentActiveProject;
 
-    if (
-      lower.startsWith("в впн") ||
-      lower.startsWith("для впн") ||
-      lower.includes("vpn") ||
-      lower.includes("антенн")
-    ) {
-      targetProjectId = "vpn";
-    } else if (
-      lower.startsWith("в срм") ||
-      lower.startsWith("для срм") ||
-      lower.includes("crm") ||
-      lower.includes("журнал")
-    ) {
-      targetProjectId = "crm";
-    } else if (
-      lower.includes("myass") ||
-      lower.includes("ассистент") ||
-      lower.includes("assistant") ||
-      lower.includes("личный бот") ||
-      lower.includes("личном боте") ||
-      lower.includes("личный ии") ||
-      lower.includes("личном ии") ||
-      lower.includes("секретар")
-    ) {
-      targetProjectId = "myassagent";
-    } else if (
-      lower.startsWith("в девоботе") ||
-      lower.startsWith("в боте разработки") ||
-      lower.includes("devbot") ||
-      lower.includes("девобот")
-    ) {
-      targetProjectId = "devbot";
-    } else if (
-      lower.startsWith("в игре") ||
-      lower.includes("cyber empire") ||
-      lower.includes("тайкун") ||
-      lower.includes("кибер импери")
-    ) {
-      targetProjectId = "game";
-    } else if (
-      lower.startsWith("во вьювере") ||
-      lower.startsWith("в вьювере") ||
-      lower.includes("viewer") ||
-      lower.includes("студи")
-    ) {
-      targetProjectId = "viewer";
+    // Check explicit inline project prefix: /p <id> <text> or /project <id> <text>
+    const explicitPrefixMatch = /^\/(?:p|project)\s+([a-zA-Z0-9_-]+)\s+([\s\S]+)$/.exec(text);
+    if (explicitPrefixMatch) {
+      const explicitId = explicitPrefixMatch[1].toLowerCase().trim();
+      const explicitProject = this.store.getProject(explicitId);
+      if (!explicitProject) {
+        const available = this.store.listProjects().map((p) => `<code>${escapeHtml(p.id)}</code>`).join(", ");
+        await this.client.sendMessage(
+          chatId,
+          `⚠️ Ошибка: проект «${escapeHtml(explicitId)}» не зарегистрирован.\n` +
+          `Доступные проекты: ${available}\n` +
+          `Задача отклонена (fallback на активный проект запрещён).`
+        );
+        return;
+      }
+      targetProjectId = explicitProject.id;
+      text = explicitPrefixMatch[2].trim();
     }
 
-    // Validate project existence in store
-    const project = this.store.getProject(targetProjectId);
-    if (!project) {
-      await this.client.sendMessage(
-        chatId,
-        `⚠️ <b>Неизвестный проект:</b> <code>${targetProjectId}</code>\n\nПожалуйста, выберите зарегистрированный проект через команду /projects.`,
-        { reply_markup: Keyboards.getProjectsInline(this.store.listProjects(), this.activeProjectId) }
-      );
-      return;
-    }
+    // Security Check: Danger Detection
+    const securityCheck = SecurityGuard.checkDangerous(text);
+    if (securityCheck.isDangerous) {
+      const confId = `CONF-${Date.now()}-${randomUUID().slice(0, 4)}`;
+      const idempotencyKey = `conf_${chatId}_${msg.message_id}_${Date.now()}`;
 
-    // Check danger
-    const danger = SecurityGuard.checkDangerous(text);
-
-    if (danger.isDangerous) {
-      this.confirmationCounter += 1;
-      const confId = `CONF-${Date.now()}-${this.confirmationCounter}`;
-      this.pendingConfirmations.set(confId, {
+      this.db.saveConfirmation({
         id: confId,
         chatId,
+        userId: fromId!,
+        idempotencyKey,
         author,
         text,
-        projectId: project.id,
-        dangerReason: danger.reason || "Потенциально опасная операция",
+        projectId: targetProjectId,
+        dangerReason: securityCheck.reason || "Потенциально опасная операция",
+        dangerCategory: securityCheck.category,
         attachments,
-        createdAt: new Date().toISOString(),
+        createdAt: Date.now(),
+        status: "PENDING",
       });
 
-      const confirmText =
-        `⚠️ <b>ВНИМАНИЕ: ПОТЕНЦИАЛЬНО ОПАСНАЯ КОМАНДА!</b>\n\n` +
-        `🆔 Номер: <code>#${confId}</code>\n` +
-        `📁 Проект: <b>${project.name}</b> (<code>${project.id}</code>)\n` +
-        `📝 <b>Текст:</b> <i>«${text}»</i>\n` +
-        `⚡ <b>Причина:</b> ${danger.reason}\n\n` +
-        `❓ <b>Вы действительно хотите выполнить эту операцию?</b>`;
+      const confirmMsg =
+        `⚠️ <b>ВНИМАНИЕ! ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ ОПЕРАЦИИ</b>\n\n` +
+        `📁 Проект: <b>${escapeHtml(targetProjectId)}</b>\n` +
+        `📝 <b>Команда:</b> <i>«${escapeHtml(text)}»</i>\n\n` +
+        `🚨 <b>Причина:</b> ${escapeHtml(securityCheck.reason || "Опасная операция")}\n\n` +
+        `Вы уверены, что хотите выполнить данную команду?`;
 
-      await this.client.sendMessage(chatId, confirmText, {
+      await this.client.sendMessage(chatId, confirmMsg, {
         reply_markup: Keyboards.getConfirmationInline(confId),
       });
       return;
     }
 
-    // Submit safe task to SQLite store
+    // Normal Command -> Submit to SQLite Queue
     const task = this.store.submit({
-      projectId: project.id,
+      projectId: targetProjectId,
       coordinatorId: "telegram",
       executorId: "antigravity",
       kind: "develop",
@@ -427,21 +477,21 @@ export class BotHandlers {
       meta: {
         author,
         chatId,
-        isVoice,
         attachments,
-        source: "telegram",
       },
-      idempotencyKey: `tg-msg-${chatId}-${msg.message_id}`,
     });
 
-    const acceptedText =
-      `⏳ <b>ЗАДАЧА ПРИНЯТА В ОЧЕРЕДЬ VIEWER:</b>\n\n` +
-      `🆔 Номер: <code>#${task.id}</code>\n` +
-      `🎯 Проект: <b>${project.name}</b> (<code>${project.id}</code>)\n` +
-      `📝 <b>Задача:</b> <i>«${text}»</i>\n\n` +
-      (isVoice ? `🎙 <i>(Распознано из голосового сообщения)</i>\n\n` : "") +
-      `<i>Выполняю... Результат и голосовой отчёт будут отправлены сюда.</i>`;
+    const activeProjectObj = this.store.getProject(targetProjectId);
+    const projectName = activeProjectObj ? activeProjectObj.name : targetProjectId;
 
-    await this.client.sendMessage(chatId, acceptedText);
+    const acceptedMsg =
+      `🚀 <b>ЗАДАЧА ПРИНЯТА В РАБОТУ!</b>\n\n` +
+      `🆔 Номер: <code>#${task.id}</code>\n` +
+      `📁 Проект: <b>${escapeHtml(projectName)}</b> (<code>${escapeHtml(targetProjectId)}</code>)\n` +
+      `📝 <b>Задача:</b> <i>«${escapeHtml(text)}»</i>\n` +
+      (attachments.length > 0 ? `📎 Вложений: <b>${attachments.length}</b>\n` : "") +
+      `\n<i>Antigravity выполняет задачу в SQLite-очереди Viewer 2...</i>`;
+
+    await this.client.sendMessage(chatId, acceptedMsg);
   }
 }
