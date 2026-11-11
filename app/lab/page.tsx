@@ -99,6 +99,7 @@ export default function Lab() {
       es.addEventListener('update', handleData);
       es.onmessage = handleData;
     } catch {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- state mirrors server data/selection by design
       setSseConnected(false);
     }
 
@@ -112,6 +113,7 @@ export default function Lab() {
 
   // Fallback polling: 15s interval (reduced frequency since SSE handles instant delivery)
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- state mirrors server data/selection by design
     void load();
     const timer = setInterval(() => {
       if (!document.hidden) void load();
@@ -122,12 +124,14 @@ export default function Lab() {
   const selectedVersion = tasks.find(t => t.id === selected)?.version;
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- state mirrors server data/selection by design
     setNotes('');
     setError('');
   }, [selected]);
 
   useEffect(() => {
     const controller = new AbortController();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- state mirrors server data/selection by design
     setEvents([]);
     if (selected) {
       void fetch(`/api/lab?id=${encodeURIComponent(selected)}`, { cache: 'no-store', signal: controller.signal })

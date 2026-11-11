@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { openStore } from '../queue/store.ts';
-import { createEventsResponse } from '../../app/api/lab/events/route.ts';
+import { createEventsResponse } from './events.ts';
 
 test('SSE events: rejects cross-origin and serves text/event-stream with init payload', async () => {
   const store = openStore({ dbPath: ':memory:' });

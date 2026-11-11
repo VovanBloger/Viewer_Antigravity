@@ -56,8 +56,8 @@ async function main() {
   const root = fs.realpathSync(values.source);
   // Read only canonical IDs. Never rely on the legacy fuzzy project lookup/fallback.
   const config = JSON.parse(fs.readFileSync(path.join(root, 'config/projects.config.json'), 'utf8'));
-  const module = await import(pathToFileURL(path.join(root, 'src/core/queue.ts')).href);
-  const queue = module.QueueService ?? module.default?.QueueService;
+  const legacy = await import(pathToFileURL(path.join(root, 'src/core/queue.ts')).href);
+  const queue = legacy.QueueService ?? legacy.default?.QueueService;
   if (!queue) throw new Error('Legacy QueueService is unavailable');
   const adapter = createAdapter(queue, config.projects.map((p: { id: string }) => p.id));
   let result;

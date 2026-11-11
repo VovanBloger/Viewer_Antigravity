@@ -11,5 +11,5 @@ process.chdir(root);
 process.env.VIEWER_QUEUE_DB ??= path.join(root, '.viewer-live', 'agent-queue.db');
 process.env.VIEWER_BROWSER_ROOT ??= path.join(root, '.viewer-live', 'browser');
 register();
-try { const module = await import(service); await module.main(); }
+try { const loaded = await import(service); await loaded.main(); }
 catch (e) { console.error(e instanceof Error ? e.message : 'SERVICE_START_FAILED'); process.exit(1); }
