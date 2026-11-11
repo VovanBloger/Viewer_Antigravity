@@ -32,7 +32,7 @@ export function createBrowserServer(lab: BrowserLab, store: TaskStore) {
   return server;
 }
 
-async function main() {
+export async function main() {
   const store = openStore({ dbPath: process.env.VIEWER_QUEUE_DB });
   const lab = new BrowserLab(process.env.VIEWER_BROWSER_ROOT ?? path.resolve('.viewer-live', 'browser'), process.env.VIEWER_HEADLESS === '1');
   const server = createBrowserServer(lab, store);

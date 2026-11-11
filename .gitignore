@@ -35,3 +35,5 @@ next-env.d.ts
 *.db-wal
 *.db-shm
 /.viewer-live/
+/.mcp.json
+/.codex/config.toml

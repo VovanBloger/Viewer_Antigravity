@@ -219,7 +219,7 @@ export function createServer(store: TaskStore): McpServer {
   return server;
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const store = openStore();
   const server = createServer(store);
   let stopping = false;
