@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 type Task = {
@@ -225,7 +226,7 @@ export default function Lab() {
       <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
         <div>
           <div className="flex items-center gap-3 text-sm text-slate-400">
-            <a href="/" className="hover:text-white">← Viewer Workbench</a>
+            <Link href="/" className="hover:text-white">← Viewer Workbench</Link>
             <span>•</span>
             <a href="/demo" className="hover:text-white">Demo App</a>
           </div>
@@ -499,6 +500,7 @@ export default function Lab() {
                               </p>
                               {isPng && (
                                 <div className="mt-2">
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
                                   <img
                                     src={`/api/lab?artifact=${encodeURIComponent(name)}`}
                                     alt="Скриншот артефакта"

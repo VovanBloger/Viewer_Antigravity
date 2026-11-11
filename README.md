@@ -1,3 +1,40 @@
+# Viewer 2 — запуск с нуля (≈10 минут)
+
+Студия для Telegram-проектов: координатор (Codex/Claude) ставит задания в SQLite-очередь, Antigravity их выполняет, настоящий Telegram WebK под Playwright проверяет результат.
+
+**Требования:** Node.js ≥ 24 (нужен встроенный `node:sqlite`), Git, Windows/macOS/Linux.
+
+```bash
+git clone https://github.com/VovanBloger/Viewer_Antigravity.git
+cd Viewer_Antigravity
+git checkout viewer2-platform
+npm ci
+npx playwright install chromium
+```
+
+Проверка (все команды должны завершиться без ошибок; в CI выполняются те же):
+
+```bash
+npm test
+npx tsc --noEmit
+npx eslint .
+npx next build
+```
+
+Запуск студии: `npm run viewer:dev` → <http://127.0.0.1:3100/lab> (верстак — `/`).
+
+Очередь заданий (база `.viewer-live/agent-queue.db` создаётся сама):
+
+```bash
+npm run --silent agents:task -- projects add --id=viewer --name="Viewer" --path="."
+```
+
+Затем в беседе Antigravity: `/agents viewer`; координатору подключить MCP из `.mcp.json`. Подробнее: [docs/agent-queue.md](docs/agent-queue.md), [docs/browser-runtime.md](docs/browser-runtime.md), [docs/ROADMAP.md](docs/ROADMAP.md).
+
+Секреты (`.env`, токены ботов, сессии Telegram) в репозиторий не коммитятся и моделям не передаются.
+
+---
+
 # ⚡ Viewer Antigravity
 
 <p align="center">
