@@ -1,0 +1,107 @@
+{
+  "activeProjectId": "viewer",
+  "projects": [
+    {
+      "id": "viewer",
+      "name": "Viewer 2",
+      "icon": "👁️",
+      "description": "Мобильная студия предварительного просмотра и управления агентами Viewer 2",
+      "path": ".",
+      "branch": "ag/telegram-gateway",
+      "aliases": [
+        "viewer",
+        "вьювер",
+        "вивер",
+        "студия",
+        "viewer2"
+      ],
+      "testCommand": "npm test",
+      "typecheckCommand": "npx tsc --noEmit",
+      "url": "http://localhost:3100"
+    },
+    {
+      "id": "crm",
+      "name": "Журнал ERP & CRM",
+      "icon": "📊",
+      "description": "Система управления заказами, сменами, сотрудниками и финансами",
+      "path": "c:\\Users\\vovan\\Desktop\\Журнал CRM",
+      "branch": "master",
+      "aliases": [
+        "crm",
+        "срм",
+        "журнал",
+        "erp"
+      ],
+      "testCommand": "npm run test:fast",
+      "typecheckCommand": "npm run typecheck",
+      "deployCommand": "npm run deploy:prod -- --confirm-prod",
+      "url": "https://crm.wowpn.com"
+    },
+    {
+      "id": "vpn",
+      "name": "Антенна VPN",
+      "icon": "🛡️",
+      "description": "Сервис VPN, Reality ноды, Remnawave",
+      "path": "h:\\Мой диск\\VPN",
+      "branch": "main",
+      "aliases": [
+        "vpn",
+        "впн",
+        "антенна",
+        "antenna"
+      ],
+      "testCommand": "python -m unittest",
+      "url": "https://bedolaga.wowpn.com"
+    },
+    {
+      "id": "myassagent",
+      "name": "Тг ассистент (@MyAssAgent)",
+      "icon": "🎭",
+      "description": "Telegram Serverless-бот (tgcloud), персональный секретарь",
+      "path": "c:\\Users\\vovan\\Desktop\\MyAssAgent",
+      "branch": "main",
+      "aliases": [
+        "assistant",
+        "myass",
+        "secretary",
+        "личный",
+        "тг ассистент",
+        "ассистент"
+      ],
+      "testCommand": "npm run status",
+      "deployCommand": "npm run deploy",
+      "url": "https://t.me/MyAssAgent"
+    },
+    {
+      "id": "devbot",
+      "name": "Antigravity Dev Bot",
+      "icon": "🤖",
+      "description": "Телеграм-бот AI-разработчика и координатор Antigravity",
+      "path": "c:\\Users\\vovan\\Desktop\\Antigravity Dev Bot",
+      "branch": "master",
+      "aliases": [
+        "devbot",
+        "девобот",
+        "dev bot"
+      ],
+      "typecheckCommand": "npm run typecheck"
+    },
+    {
+      "id": "game",
+      "name": "Игра Cyber Empire",
+      "icon": "🎮",
+      "description": "Telegram Mini App игра Cyber Empire",
+      "path": "c:\\Users\\vovan\\Desktop\\vpn-tycoon_-cyber-empire",
+      "branch": "master",
+      "aliases": [
+        "game",
+        "игра",
+        "игру",
+        "cyber empire"
+      ],
+      "testCommand": "npm test",
+      "typecheckCommand": "npm run lint",
+      "url": "https://game.wowpn.com"
+    }
+  ]
+}

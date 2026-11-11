@@ -7,17 +7,21 @@
     "build": "next build",
     "start": "next start -p 3100",
     "lint": "eslint .",
-    "test": "node --test --import tsx lib/antigravity-core.test.ts \"runtime/**/*.test.ts\"",
+    "test": "node --test --import tsx lib/antigravity-core.test.ts \"runtime/**/*.test.ts\" \"integrations/**/*.test.ts\"",
     "clean": "next clean",
     "agents:mcp": "tsx runtime/mcp/server.ts",
     "agents:wait": "tsx runtime/cli/wait-task.ts",
-    "agents:task": "tsx runtime/cli/task.ts"
+    "agents:task": "tsx runtime/cli/task.ts",
+    "devbot:start": "tsx integrations/devbot/index.ts",
+    "devbot:cmd": "tsx integrations/devbot/runner/cli.ts",
+    "devbot:wait": "tsx integrations/devbot/runner/wait-command.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/qrcode": "^1.5.6",
     "autoprefixer": "^10.4.21",
     "clsx": "^2.1.1",
+    "dotenv": "^18.0.10",
     "lucide-react": "^0.553.0",
     "next": "^15.4.9",
     "postcss": "^8.5.6",
