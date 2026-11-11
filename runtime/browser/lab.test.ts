@@ -43,3 +43,67 @@ test('real Chromium: isolated actors, owner and pause checks, actual screenshot'
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('BrowserLab: pruneArtifacts removes expired files and enforces FIFO maxCount', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-prune-test-'));
+  const lab = new BrowserLab(root, true);
+  const artifactsDir = path.join(root, 'artifacts');
+  fs.mkdirSync(artifactsDir, { recursive: true });
+
+  try {
+    const now = Date.now();
+    const offsetsHours = [10, 8, 2, 1, 0.1]; // shot-1 oldest, shot-5 newest
+    for (let i = 1; i <= 5; i++) {
+      const filePath = path.join(artifactsDir, `shot-${i}.png`);
+      fs.writeFileSync(filePath, `artifact-${i}`);
+      const mtime = new Date(now - offsetsHours[i - 1] * 3600 * 1000);
+      fs.utimesSync(filePath, mtime, mtime);
+    }
+
+    // 1. Prune files older than 5 hours (should delete shot-1 and shot-2)
+    lab.pruneArtifacts(5 * 3600 * 1000, 100);
+    let remaining = fs.readdirSync(artifactsDir);
+    assert.deepEqual(remaining.sort(), ['shot-3.png', 'shot-4.png', 'shot-5.png']);
+
+    // 2. Prune by maxCount = 2 (should delete oldest remaining: shot-3.png)
+    lab.pruneArtifacts(24 * 3600 * 1000, 2);
+    remaining = fs.readdirSync(artifactsDir);
+    assert.deepEqual(remaining.sort(), ['shot-4.png', 'shot-5.png']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('BrowserLab: recoverActorLease automatically recovers dead lease for test network', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-lease-test-'));
+  const lab = new BrowserLab(root, true);
+  try {
+    lab.registerActor({ id: 'actor-test', label: 'Test Actor', network: 'test' });
+    lab.registerActor({ id: 'actor-prod', label: 'Prod Actor', network: 'production' });
+
+    const profilesDir = path.join(root, 'profiles');
+    fs.mkdirSync(profilesDir, { recursive: true });
+
+    // Mock stale lease with non-existent PID (99999999)
+    const deadPid = 99999999;
+    const testLock = path.join(profilesDir, 'test-actor-test.lease');
+    fs.writeFileSync(testLock, JSON.stringify({ pid: deadPid, owner: 'crashed-worker' }));
+
+    // Should recover automatically for network 'test' without requiring confirmation
+    const res = lab.recoverActorLease('actor-test', 'test');
+    assert.equal(res.recovered, true);
+    assert.equal(fs.existsSync(testLock), false);
+
+    // Production network must require operator confirmation
+    const prodLock = path.join(profilesDir, 'production-actor-prod.lease');
+    fs.writeFileSync(prodLock, JSON.stringify({ pid: deadPid, owner: 'crashed-worker' }));
+    assert.throws(() => lab.recoverActorLease('actor-prod', 'production'), /RECOVERY_REQUIRES_OPERATOR/);
+
+    // With confirmation, production can be recovered
+    const prodRes = lab.recoverActorLease('actor-prod', 'production', 'browser-processes-confirmed-stopped');
+    assert.equal(prodRes.recovered, true);
+    assert.equal(fs.existsSync(prodLock), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

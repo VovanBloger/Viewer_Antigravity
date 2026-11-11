@@ -181,11 +181,16 @@ export class TelegramGateway {
     }
 
     while (this.isRunning) {
+      if (!this.client.isConfigured()) {
+        await new Promise((r) => setTimeout(r, 10000));
+        continue;
+      }
+
       try {
         await this.pollOnce();
       } catch (err: any) {
         console.error("[TelegramGateway] Polling loop error:", err.message || err);
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 5000));
       }
     }
   }

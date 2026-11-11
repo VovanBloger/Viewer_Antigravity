@@ -27,6 +27,7 @@ type Task = {
 type TaskEvent = { at: string; type: string; actor: string };
 type Project = { id: string; name: string };
 type BrowserSession = { id: string; actorId: string; owner: string; projectId: string; network: string; paused: boolean; mode: string };
+type StatusFilter = 'ALL' | 'REPORTED' | 'IN_PROGRESS' | 'APPROVED' | 'FAILED';
 
 const terminal = ['APPROVED', 'FAILED', 'CANCELLED', 'RETURNED'];
 
@@ -45,6 +46,9 @@ export default function Lab() {
   const [goal, setGoal] = useState('');
   const [acceptance, setAcceptance] = useState('');
   const [notes, setNotes] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sseConnected, setSseConnected] = useState(false);
 
   const submitKey = useRef<{ payload: string; key: string } | null>(null);
   const refresh = useRef(0);
@@ -66,11 +70,52 @@ export default function Lab() {
     }
   }, []);
 
+  // EventSource (SSE) connection for instant real-time queue reactivity
+  useEffect(() => {
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/lab/events');
+      es.onopen = () => {
+        setSseConnected(true);
+      };
+      es.onerror = () => {
+        setSseConnected(false);
+      };
+
+      const handleData = (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.tasks) setTasks(data.tasks);
+          if (data.sessions) setSessions(data.sessions);
+          if (data.projects) setProjects(data.projects);
+          setLoadError('');
+          setLoaded(true);
+        } catch {
+          // ignore heartbeats/ping
+        }
+      };
+
+      es.addEventListener('init', handleData);
+      es.addEventListener('update', handleData);
+      es.onmessage = handleData;
+    } catch {
+      setSseConnected(false);
+    }
+
+    return () => {
+      if (es) {
+        es.close();
+        es = null;
+      }
+    };
+  }, []);
+
+  // Fallback polling: 15s interval (reduced frequency since SSE handles instant delivery)
   useEffect(() => {
     void load();
     const timer = setInterval(() => {
       if (!document.hidden) void load();
-    }, 3000);
+    }, 15000);
     return () => clearInterval(timer);
   }, [load]);
 
@@ -142,6 +187,30 @@ export default function Lab() {
     }
   }
 
+  const countAll = tasks.length;
+  const countReported = tasks.filter(t => t.status === 'REPORTED').length;
+  const countInProgress = tasks.filter(t => t.status === 'IN_PROGRESS' || t.status === 'CLAIMED').length;
+  const countApproved = tasks.filter(t => t.status === 'APPROVED').length;
+  const countFailed = tasks.filter(t => t.status === 'FAILED' || t.status === 'RETURNED').length;
+
+  const filteredTasks = tasks.filter(t => {
+    let matchesStatus = true;
+    if (statusFilter === 'REPORTED') {
+      matchesStatus = t.status === 'REPORTED';
+    } else if (statusFilter === 'IN_PROGRESS') {
+      matchesStatus = t.status === 'IN_PROGRESS' || t.status === 'CLAIMED';
+    } else if (statusFilter === 'APPROVED') {
+      matchesStatus = t.status === 'APPROVED';
+    } else if (statusFilter === 'FAILED') {
+      matchesStatus = t.status === 'FAILED' || t.status === 'RETURNED';
+    }
+
+    const query = searchQuery.trim().toLowerCase();
+    const matchesSearch = !query || t.title.toLowerCase().includes(query) || t.id.toLowerCase().includes(query);
+
+    return matchesStatus && matchesSearch;
+  });
+
   const task = tasks.find(t => t.id === selected);
   const input = 'w-full rounded-lg border border-white/15 bg-white/5 p-3 text-sm focus:border-cyan-400 focus:outline-none';
   const button = 'rounded-lg border border-white/20 px-4 py-2 text-sm disabled:opacity-40 hover:bg-white/10 transition-colors';
@@ -160,9 +229,9 @@ export default function Lab() {
           <p className="mt-2 text-slate-400">Общая платформа и очередь: Codex, Claude, Antigravity, Telegram Gateway & Browser Studio</p>
         </div>
         <div className="flex items-center gap-3">
-          <span className="flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-400">
+          <span className="flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-400" title={sseConnected ? 'SSE поток активен' : 'Fallback polling активен'}>
             <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            Queue Live
+            {sseConnected ? 'SSE Live' : 'Queue Live'}
           </span>
           <button className={button} onClick={() => void load()}>Обновить</button>
         </div>
@@ -242,9 +311,94 @@ export default function Lab() {
         </form>
 
         <section className="space-y-5">
+          {/* Status filters and text search */}
+          <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/[0.02] p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statusFilter === 'ALL'
+                    ? 'bg-cyan-600 text-white'
+                    : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                }`}
+                onClick={() => setStatusFilter('ALL')}
+              >
+                Все ({countAll})
+              </button>
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statusFilter === 'REPORTED'
+                    ? 'bg-amber-500/30 text-amber-200 border border-amber-500/50'
+                    : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                }`}
+                onClick={() => setStatusFilter('REPORTED')}
+              >
+                На проверке ({countReported})
+              </button>
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statusFilter === 'IN_PROGRESS'
+                    ? 'bg-cyan-500/30 text-cyan-200 border border-cyan-500/50'
+                    : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                }`}
+                onClick={() => setStatusFilter('IN_PROGRESS')}
+              >
+                В работе ({countInProgress})
+              </button>
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statusFilter === 'APPROVED'
+                    ? 'bg-emerald-500/30 text-emerald-200 border border-emerald-500/50'
+                    : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                }`}
+                onClick={() => setStatusFilter('APPROVED')}
+              >
+                Приняты ({countApproved})
+              </button>
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statusFilter === 'FAILED'
+                    ? 'bg-red-500/30 text-red-200 border border-red-500/50'
+                    : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                }`}
+                onClick={() => setStatusFilter('FAILED')}
+              >
+                Ошибки ({countFailed})
+              </button>
+            </div>
+
+            <div className="relative min-w-[220px]">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Поиск по названию..."
+                className="w-full rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white placeholder-slate-400 focus:border-cyan-400 focus:outline-none"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-white"
+                  title="Очистить"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          </div>
+
           <div className="overflow-auto rounded-xl border border-white/10 bg-white/[0.02]">
             <table className="w-full text-left text-sm">
-              <caption className="p-3 text-left text-xs text-slate-400">Последние 100 заданий · новые сверху</caption>
+              <caption className="p-3 text-left text-xs text-slate-400">
+                {tasks.length > 0
+                  ? `Показано ${filteredTasks.length} из ${tasks.length} заданий · новые сверху`
+                  : 'Последние 100 заданий · новые сверху'}
+              </caption>
               <thead className="bg-white/5 text-slate-400">
                 <tr>
                   <th className="p-3">Задание</th>
@@ -254,7 +408,7 @@ export default function Lab() {
                 </tr>
               </thead>
               <tbody>
-                {tasks.map(t => (
+                {filteredTasks.map(t => (
                   <tr key={t.id} className={selected === t.id ? 'bg-cyan-400/10' : 'border-t border-white/5 hover:bg-white/[0.02]'}>
                     <td className="p-3">
                       <button className="text-left hover:text-cyan-300" onClick={() => setSelected(t.id)}>
@@ -278,9 +432,11 @@ export default function Lab() {
                 ))}
               </tbody>
             </table>
-            {tasks.length === 0 && (
+            {filteredTasks.length === 0 && (
               <p className="p-6 text-slate-400">
-                {loaded ? 'Заданий пока нет. Выберите проект и поставьте первое задание.' : 'Загрузка очереди…'}
+                {tasks.length === 0
+                  ? (loaded ? 'Заданий пока нет. Выберите проект и поставьте первое задание.' : 'Загрузка очереди…')
+                  : 'Нет заданий, соответствующих выбранным критериям.'}
               </p>
             )}
           </div>

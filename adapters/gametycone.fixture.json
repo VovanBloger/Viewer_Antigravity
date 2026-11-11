@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "gametycone-fixture",
+  "projectId": "game",
+  "network": "test",
+  "botId": "game-test-bot",
+  "mode": "fixture",
+  "command": {
+    "executable": "$NODE",
+    "args": [
+      "-e",
+      "const http=require('http');http.createServer((req,res)=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({ok:true,service:'gametycone-mock',port:process.env.PORT,path:req.url}))}).listen(process.env.PORT,'127.0.0.1')"
+    ]
+  },
+  "readinessPath": "/health"
+}

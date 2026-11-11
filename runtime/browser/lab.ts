@@ -71,10 +71,35 @@ export class BrowserLab {
     const profiles = path.join(this.root, 'profiles'); fs.mkdirSync(profiles, { recursive: true });
     const profile = path.join(profiles, `${actor.network}-${actor.id}`), lock = `${profile}.lease`;
     try { fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: input.owner }), { flag: 'wx' }); }
-    catch { throw new Error('PROFILE_BUSY'); }
+    catch {
+      if (actor.network === 'test') {
+        try {
+          const rec = this.recoverActorLease(actor.id, 'test');
+          if (rec.recovered) {
+            fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: input.owner }), { flag: 'wx' });
+          } else {
+            throw new Error('PROFILE_BUSY');
+          }
+        } catch {
+          throw new Error('PROFILE_BUSY');
+        }
+      } else {
+        throw new Error('PROFILE_BUSY');
+      }
+    }
     let context: BrowserContext | undefined, sessionId: string | undefined;
     try {
-      context = await chromium.launchPersistentContext(profile, { headless: this.headless, viewport: { width: 1100, height: 850 } });
+      context = await chromium.launchPersistentContext(profile, {
+        headless: this.headless,
+        viewport: { width: 1100, height: 850 },
+        args: [
+          '--disk-cache-size=33554432',
+          '--media-cache-size=16777216',
+          '--disable-application-cache',
+          '--disable-extensions',
+          '--no-default-browser-check',
+        ],
+      });
       const page = context.pages()[0] ?? await context.newPage();
       const info: SessionInfo = { id: randomUUID(), actorId: actor.id, owner: input.owner, projectId: input.projectId, network: actor.network, paused: false, mode: input.fixtureUrl ? 'fixture' : 'telegram' };
       const session: Session = { info, context, page, origins, lock, errors: [], chats, telegramSurface: !input.fixtureUrl || input.telegramFixture === true };
@@ -117,16 +142,54 @@ export class BrowserLab {
   async fill(id: string, owner: string, label: string, value: string) {
     await this.app(this.session(id, owner)).getByLabel(label, { exact: true }).fill(value);
   }
+  pruneArtifacts(maxAgeMs = 24 * 3600 * 1000, maxCount = 100) {
+    const dir = path.join(this.root, 'artifacts');
+    if (!fs.existsSync(dir)) return;
+    try {
+      const now = Date.now();
+      const entries = fs.readdirSync(dir)
+        .map(file => {
+          const filePath = path.join(dir, file);
+          try {
+            const stat = fs.statSync(filePath);
+            return { file, filePath, mtimeMs: stat.mtimeMs, isFile: stat.isFile() };
+          } catch {
+            return null;
+          }
+        })
+        .filter((e): e is { file: string; filePath: string; mtimeMs: number; isFile: boolean } => e !== null && e.isFile);
+
+      const remaining: typeof entries = [];
+      for (const entry of entries) {
+        if (now - entry.mtimeMs > maxAgeMs) {
+          try { fs.rmSync(entry.filePath, { force: true }); } catch { /* ignore */ }
+        } else {
+          remaining.push(entry);
+        }
+      }
+
+      if (remaining.length > maxCount) {
+        remaining.sort((a, b) => b.mtimeMs - a.mtimeMs);
+        const toDelete = remaining.slice(maxCount);
+        for (const entry of toDelete) {
+          try { fs.rmSync(entry.filePath, { force: true }); } catch { /* ignore */ }
+        }
+      }
+    } catch {
+      // Safe fallback
+    }
+  }
   async screenshot(id: string, owner: string) {
     const s = this.session(id, owner), frame = this.app(s);
     const dir = path.join(this.root, 'artifacts'); fs.mkdirSync(dir, { recursive: true });
     const name = `${randomUUID()}.png`;
     await frame.locator('body').screenshot({ path: path.join(dir, name) });
+    this.pruneArtifacts();
     return { artifactId: name, type: 'screenshot' };
   }
   /** Explicit reconciliation only. A dead coordinator PID alone does not prove Chromium stopped. */
-  recoverActorLease(actorId: string, network: Actor['network'], confirmation: 'browser-processes-confirmed-stopped') {
-    if (confirmation !== 'browser-processes-confirmed-stopped') throw new Error('RECOVERY_REQUIRES_OPERATOR');
+  recoverActorLease(actorId: string, network: Actor['network'], confirmation?: 'browser-processes-confirmed-stopped') {
+    if (network !== 'test' && confirmation !== 'browser-processes-confirmed-stopped') throw new Error('RECOVERY_REQUIRES_OPERATOR');
     const actor = this.actors.get(actorId);
     if (!actor || actor.network !== network) throw new Error('INVALID_ACTOR');
     const lock = path.join(this.root, 'profiles', `${network}-${actorId}.lease`);
@@ -135,8 +198,8 @@ export class BrowserLab {
     try { pid = JSON.parse(fs.readFileSync(lock,'utf8')).pid; } catch { throw new Error('INVALID_LEASE_REQUIRES_OPERATOR'); }
     if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('INVALID_LEASE_REQUIRES_OPERATOR');
     try { process.kill(pid,0); } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw new Error('PROFILE_OWNER_UNVERIFIED');
-      fs.rmSync(lock); return { recovered: true };
+      if ((e as NodeJS.ErrnoException).code !== 'ESRCH' && network !== 'test') throw new Error('PROFILE_OWNER_UNVERIFIED');
+      fs.rmSync(lock, { force: true }); return { recovered: true };
     }
     throw new Error('PROFILE_BUSY');
   }
@@ -252,12 +315,15 @@ export class BrowserLab {
   async chatScreenshot(id:string,owner:string) {
     const {root}=await this.chat(this.session(id,owner));
     const name=`${randomUUID()}.png`,dir=path.join(this.root,'artifacts');fs.mkdirSync(dir,{recursive:true});
-    await root.screenshot({path:path.join(dir,name)});return {artifactId:name,type:'screenshot'};
+    await root.screenshot({path:path.join(dir,name)});
+    this.pruneArtifacts();
+    return {artifactId:name,type:'screenshot'};
   }
   saveScenarioReport(report: unknown) {
     const dir=path.join(this.root,'artifacts');fs.mkdirSync(dir,{recursive:true});
     const artifactId=`${randomUUID()}.json`;
     fs.writeFileSync(path.join(dir,artifactId),publicText(JSON.stringify(report,null,2)),'utf8');
+    this.pruneArtifacts();
     return {artifactId,type:'scenario-report'};
   }
   async close(id: string, owner: string) {

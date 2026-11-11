@@ -52,6 +52,9 @@ export interface SqliteTaskStore extends TaskStore {
   /** Вставляет задание в произвольном состоянии; идемпотентно по legacyId (возвращает существующее). */
   importTask(task: ImportedTask, eventData?: Record<string, unknown>): AgentTask;
   getByLegacyId(legacyId: string): AgentTask | undefined;
+  /** Алиасы для удобства интеграции с верстаком и API-мостами */
+  listTasks(filter?: TaskFilter): AgentTask[];
+  submitTask(spec: TaskSpec): AgentTask;
 }
 
 export interface OpenStoreOptions {
@@ -890,8 +893,10 @@ export function openStore(options: OpenStoreOptions = {}): SqliteTaskStore {
     getProject,
     listProjects,
     submit,
+    submitTask: submit,
     get,
     list,
+    listTasks: list,
     cancel,
     submitVerdict,
     waitForChange,

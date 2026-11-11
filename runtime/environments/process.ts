@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import path from 'node:path';
 import net from 'node:net';
 import type { CommandRunner, ProcessFactory } from './manager.ts';
@@ -56,10 +56,30 @@ export function localProcessFactory(executables: string[], readinessTimeoutMs = 
       async stop() {
         if(stopping) return stopping;
         stopping=(async()=>{
-          if(!exited) child.kill();
+          const terminate = (forceSig?: NodeJS.Signals) => {
+            if (exited) return;
+            if (process.platform === 'win32') {
+              if (child.pid) {
+                try {
+                  execSync('taskkill /pid ' + child.pid + ' /T /F', { windowsHide: true, stdio: 'ignore' });
+                } catch {
+                  // Process already terminated; safe to ignore
+                }
+              }
+            } else {
+              try {
+                if (forceSig) child.kill(forceSig);
+                else child.kill();
+              } catch {
+                // Process already terminated; safe to ignore
+              }
+            }
+          };
+
+          if(!exited) terminate();
           try { await waitForClose(2000); }
           catch {
-            if(!exited) child.kill('SIGKILL');
+            if(!exited) terminate('SIGKILL');
             await waitForClose(3000);
           }
         })();

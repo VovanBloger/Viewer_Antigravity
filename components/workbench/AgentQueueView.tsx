@@ -31,6 +31,55 @@ interface AgentQueueViewProps {
   onAddSampleTask: () => void;
 }
 
+function getTaskStatusInfo(status?: string) {
+  switch (status) {
+    case 'QUEUED':
+      return {
+        label: 'В очереди',
+        badgeClass: 'bg-amber-500/15 border-amber-500/35 text-amber-300',
+        dotClass: 'bg-amber-400',
+      };
+    case 'IN_PROGRESS':
+      return {
+        label: 'В работе',
+        badgeClass: 'bg-blue-500/15 border-blue-500/35 text-blue-300',
+        dotClass: 'bg-blue-400 animate-pulse',
+      };
+    case 'REPORTED':
+      return {
+        label: 'Готово к проверке',
+        badgeClass: 'bg-purple-500/15 border-purple-500/35 text-purple-300',
+        dotClass: 'bg-purple-400',
+      };
+    case 'APPROVED':
+      return {
+        label: 'Принято',
+        badgeClass: 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300',
+        dotClass: 'bg-emerald-400',
+      };
+    case 'RETURNED':
+      return {
+        label: 'На доработке',
+        badgeClass: 'bg-rose-500/15 border-rose-500/35 text-rose-300',
+        dotClass: 'bg-rose-400',
+      };
+    case 'FAILED':
+      return {
+        label: 'Ошибка',
+        badgeClass: 'bg-rose-500/20 border-rose-500/40 text-rose-400',
+        dotClass: 'bg-rose-500',
+      };
+    case 'CANCELLED':
+      return {
+        label: 'Отменено',
+        badgeClass: 'bg-zinc-500/15 border-zinc-500/35 text-zinc-400',
+        dotClass: 'bg-zinc-400',
+      };
+    default:
+      return null;
+  }
+}
+
 export function AgentQueueView({
   queue,
   isDark,
@@ -42,6 +91,8 @@ export function AgentQueueView({
 }: AgentQueueViewProps) {
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [syncState, setSyncState] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
+  const [isRefreshingStatuses, setIsRefreshingStatuses] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [ideScheme, setIdeScheme] = useState<'antigravity' | 'vscode' | 'cursor'>('antigravity');
 
@@ -73,12 +124,62 @@ export function AgentQueueView({
       if (data.ok) {
         setSyncState('synced');
         setLastSyncTime(new Date().toLocaleTimeString('ru-RU'));
+        if (Array.isArray(data.tasks)) {
+          for (const item of queue) {
+            const matchingTask = data.tasks.find(
+              (t: { id?: string; idempotencyKey?: string; meta?: Record<string, unknown> }) =>
+                t.id === item.taskId ||
+                t.idempotencyKey === `wb-${item.id}` ||
+                (t.meta && (t.meta as Record<string, unknown>).workbenchItemId === item.id)
+            );
+            if (matchingTask) {
+              onUpdateItem(item.id, {
+                taskId: matchingTask.id,
+                taskStatus: matchingTask.status,
+              });
+            }
+          }
+        }
         setTimeout(() => setSyncState('idle'), 3000);
       } else {
         setSyncState('error');
       }
     } catch {
       setSyncState('error');
+    }
+  };
+
+  const handleRefreshStatuses = async () => {
+    setIsRefreshingStatuses(true);
+    setStatusMessage(null);
+    try {
+      const res = await fetch('/api/antigravity-bridge');
+      const data = await res.json();
+      if (data.ok && Array.isArray(data.tasks)) {
+        let updatedCount = 0;
+        for (const item of queue) {
+          const matchingTask = data.tasks.find(
+            (t: { id?: string; idempotencyKey?: string; meta?: Record<string, unknown> }) =>
+              t.id === item.taskId ||
+              t.idempotencyKey === `wb-${item.id}` ||
+              (t.meta && (t.meta as Record<string, unknown>).workbenchItemId === item.id)
+          );
+          if (matchingTask) {
+            onUpdateItem(item.id, {
+              taskId: matchingTask.id,
+              taskStatus: matchingTask.status,
+            });
+            updatedCount++;
+          }
+        }
+        setStatusMessage(`Обновлено: ${updatedCount} задач`);
+        setTimeout(() => setStatusMessage(null), 3000);
+      }
+    } catch {
+      setStatusMessage('Ошибка опроса');
+      setTimeout(() => setStatusMessage(null), 3000);
+    } finally {
+      setIsRefreshingStatuses(false);
     }
   };
 
@@ -115,8 +216,8 @@ export function AgentQueueView({
             type="button"
             onClick={handleSyncToWorkspace}
             disabled={syncState === 'syncing'}
-            title="Записать очередь правок в ANTIGRAVITY_TASKS.md"
-            className={`col-span-7 h-6 px-2 rounded border text-[10px] font-mono font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors truncate ${
+            title="Записать очередь правок в ANTIGRAVITY_TASKS.md и SQLite очередь"
+            className={`col-span-5 h-6 px-1.5 rounded border text-[10px] font-mono font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors truncate ${
               syncState === 'synced'
                 ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
                 : isDark
@@ -127,10 +228,29 @@ export function AgentQueueView({
             <RefreshCw className={`w-3 h-3 shrink-0 ${syncState === 'syncing' ? 'animate-spin' : ''}`} />
             <span className="truncate">
               {syncState === 'synced'
-                ? 'Сохранено в проект!'
+                ? 'Синхронизировано!'
                 : syncState === 'syncing'
                 ? 'Запись...'
-                : 'Записать в проект'}
+                : 'Синхронизировать'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleRefreshStatuses}
+            disabled={isRefreshingStatuses}
+            title="Опросить актуальные статусы задач из SQLite очереди"
+            className={`col-span-4 h-6 px-1.5 rounded border text-[10px] font-mono font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors truncate ${
+              isRefreshingStatuses
+                ? 'bg-purple-500/20 border-purple-500/40 text-purple-300'
+                : isDark
+                ? 'bg-[#18181C] border-[#27272A] text-zinc-300 hover:text-white hover:bg-zinc-800'
+                : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-100'
+            }`}
+          >
+            <RefreshCw className={`w-3 h-3 shrink-0 ${isRefreshingStatuses ? 'animate-spin' : ''}`} />
+            <span className="truncate">
+              {isRefreshingStatuses ? 'Опрос...' : 'Обновить статус'}
             </span>
           </button>
 
@@ -138,13 +258,13 @@ export function AgentQueueView({
             aria-label="Протокол открытия IDE"
             value={ideScheme}
             onChange={(e) => setIdeScheme(e.target.value as 'antigravity' | 'vscode' | 'cursor')}
-            className={`col-span-3 h-6 px-1 rounded border text-[10px] font-mono cursor-pointer truncate ${
+            className={`col-span-2 h-6 px-0.5 rounded border text-[10px] font-mono cursor-pointer truncate ${
               isDark ? 'bg-[#18181C] border-[#27272A] text-zinc-300' : 'bg-white border-zinc-200 text-zinc-700'
             }`}
           >
             <option value="antigravity">AGY</option>
-            <option value="vscode">VSCode</option>
-            <option value="cursor">Cursor</option>
+            <option value="vscode">VS</option>
+            <option value="cursor">Cur</option>
           </select>
 
           {queue.length > 0 ? (
@@ -152,7 +272,7 @@ export function AgentQueueView({
               type="button"
               onClick={onClearQueue}
               title="Очистить все пины очереди"
-              className="col-span-2 h-6 rounded border border-rose-500/30 text-rose-400 hover:bg-rose-500/15 flex items-center justify-center cursor-pointer transition-colors"
+              className="col-span-1 h-6 rounded border border-rose-500/30 text-rose-400 hover:bg-rose-500/15 flex items-center justify-center cursor-pointer transition-colors"
             >
               <Trash2 className="w-3 h-3" />
             </button>
@@ -161,7 +281,7 @@ export function AgentQueueView({
               type="button"
               onClick={onAddSampleTask}
               title="Добавить пример задачи"
-              className={`col-span-2 h-6 rounded border text-[10px] flex items-center justify-center cursor-pointer transition-colors ${
+              className={`col-span-1 h-6 rounded border text-[10px] flex items-center justify-center cursor-pointer transition-colors ${
                 isDark
                   ? 'bg-[#18181C] border-[#27272A] text-zinc-400 hover:text-zinc-200'
                   : 'bg-white border-zinc-200 text-zinc-600'
@@ -174,7 +294,12 @@ export function AgentQueueView({
 
         {lastSyncTime && (
           <div className="text-[10px] font-mono text-emerald-400 text-center truncate">
-            ✓ Синхронизировано в ANTIGRAVITY_TASKS.md в {lastSyncTime}
+            ✓ Синхронизировано в SQLite и ANTIGRAVITY_TASKS.md в {lastSyncTime}
+          </div>
+        )}
+        {statusMessage && (
+          <div className="text-[10px] font-mono text-purple-400 text-center truncate">
+            ℹ {statusMessage}
           </div>
         )}
       </div>
@@ -199,21 +324,40 @@ export function AgentQueueView({
             </span>
           </button>
 
-          {queue.length === 0 && (
+          <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={onAddSampleTask}
-              title="Загрузить демонстрационную задачу в очередь"
-              className={`h-6 px-1.5 rounded text-[10px] font-medium flex items-center gap-1 cursor-pointer ${
-                isDark
-                  ? 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
-                  : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100'
+              onClick={handleRefreshStatuses}
+              disabled={isRefreshingStatuses}
+              title="Обновить статус задач из SQLite очереди"
+              className={`h-6 px-1.5 rounded border text-[10px] font-medium flex items-center gap-1 cursor-pointer transition-colors ${
+                isRefreshingStatuses
+                  ? 'bg-purple-500/20 border-purple-500/40 text-purple-300'
+                  : isDark
+                  ? 'border-[#27272A] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                  : 'border-zinc-200 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100'
               }`}
             >
-              <Plus className="w-3 h-3" />
-              <span>Пример</span>
+              <RefreshCw className={`w-3 h-3 shrink-0 ${isRefreshingStatuses ? 'animate-spin' : ''}`} />
+              <span>{isRefreshingStatuses ? 'Обновление...' : 'Обновить статус'}</span>
             </button>
-          )}
+
+            {queue.length === 0 && (
+              <button
+                type="button"
+                onClick={onAddSampleTask}
+                title="Загрузить демонстрационную задачу в очередь"
+                className={`h-6 px-1.5 rounded text-[10px] font-medium flex items-center gap-1 cursor-pointer ${
+                  isDark
+                    ? 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
+                    : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100'
+                }`}
+              >
+                <Plus className="w-3 h-3" />
+                <span>Пример</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {openQueue && (
@@ -248,6 +392,8 @@ export function AgentQueueView({
                   item.element.sourceLine,
                   ideScheme
                 );
+                const statusInfo = getTaskStatusInfo(item.taskStatus);
+
                 return (
                   <div
                     key={item.id}
@@ -284,28 +430,44 @@ export function AgentQueueView({
                       </div>
                     </div>
 
-                    {/* Controls row: Priority & IDE deep link */}
-                    <div className="flex items-center justify-between gap-1.5">
-                      <select
-                        aria-label={`Приоритет пина #${item.pinNumber}`}
-                        value={item.priority}
-                        onChange={(e) =>
-                          onUpdateItem(item.id, {
-                            priority: e.target.value as 'high' | 'normal' | 'low',
-                          })
-                        }
-                        className={`h-6 px-1.5 rounded border text-[10px] font-medium cursor-pointer ${
-                          item.priority === 'high'
-                            ? 'bg-rose-500/15 border-rose-500/40 text-rose-300'
-                            : isDark
-                            ? 'bg-[#18181C] border-[#27272A] text-zinc-300'
-                            : 'bg-white border-zinc-200 text-zinc-700'
-                        }`}
-                      >
-                        <option value="high">Высокий</option>
-                        <option value="normal">Обычный</option>
-                        <option value="low">Низкий</option>
-                      </select>
+                    {/* Controls row: Priority & Status badge & IDE deep link */}
+                    <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                      <div className="flex items-center gap-1.5">
+                        <select
+                          aria-label={`Приоритет пина #${item.pinNumber}`}
+                          value={item.priority}
+                          onChange={(e) =>
+                            onUpdateItem(item.id, {
+                              priority: e.target.value as 'high' | 'normal' | 'low',
+                            })
+                          }
+                          className={`h-6 px-1.5 rounded border text-[10px] font-medium cursor-pointer ${
+                            item.priority === 'high'
+                              ? 'bg-rose-500/15 border-rose-500/40 text-rose-300'
+                              : isDark
+                              ? 'bg-[#18181C] border-[#27272A] text-zinc-300'
+                              : 'bg-white border-zinc-200 text-zinc-700'
+                          }`}
+                        >
+                          <option value="high">Высокий</option>
+                          <option value="normal">Обычный</option>
+                          <option value="low">Низкий</option>
+                        </select>
+
+                        {/* Real task status display */}
+                        {statusInfo && (
+                          <span
+                            className={`h-6 px-1.5 rounded border text-[10px] font-mono font-medium inline-flex items-center gap-1 shrink-0 ${statusInfo.badgeClass}`}
+                            title={item.taskId ? `Задача в SQLite: ${item.taskId}` : undefined}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusInfo.dotClass}`} />
+                            <span>{statusInfo.label}</span>
+                            {item.taskId && (
+                              <span className="opacity-70 text-[9px]">({item.taskId})</span>
+                            )}
+                          </span>
+                        )}
+                      </div>
 
                       {deepLink && (
                         <a

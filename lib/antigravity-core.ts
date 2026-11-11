@@ -128,6 +128,9 @@ export interface AgentQueueItem {
   directiveId?: string;
   note: string;
   priority: 'high' | 'normal' | 'low';
+  title?: string;
+  taskId?: string;
+  taskStatus?: string;
 }
 
 export interface AuditNodeInput {
