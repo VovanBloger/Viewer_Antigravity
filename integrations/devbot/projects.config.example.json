@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DevBotProjectsConfig",
+  "description": "Пример конфигурации проектов с относительными перемещаемыми путями",
+  "projects": [
+    {
+      "id": "viewer",
+      "name": "Viewer 2",
+      "icon": "👁️",
+      "description": "Мобильная студия предварительного просмотра и управления агентами Viewer 2",
+      "path": ".",
+      "aliases": ["viewer", "вьювер", "вивер", "студия", "viewer2"]
+    },
+    {
+      "id": "crm",
+      "name": "Журнал ERP & CRM",
+      "icon": "📊",
+      "description": "Система управления заказами, сменами, сотрудниками и финансами",
+      "path": "./repos/crm",
+      "aliases": ["crm", "срм", "журнал", "erp"]
+    },
+    {
+      "id": "vpn",
+      "name": "Антенна VPN",
+      "icon": "🛡️",
+      "description": "Сервис VPN, Reality ноды, Remnawave",
+      "path": "./repos/vpn",
+      "aliases": ["vpn", "впн", "антенна", "antenna"]
+    },
+    {
+      "id": "myassagent",
+      "name": "Тг ассистент (@MyAssAgent)",
+      "icon": "🎭",
+      "description": "Telegram Serverless-бот (tgcloud), персональный секретарь",
+      "path": "./repos/myassagent",
+      "aliases": ["assistant", "myass", "secretary", "личный", "тг ассистент", "ассистент"]
+    },
+    {
+      "id": "devbot",
+      "name": "Antigravity Dev Bot",
+      "icon": "🤖",
+      "description": "Телеграм-бот AI-разработчика и координатор Antigravity",
+      "path": "./repos/devbot",
+      "aliases": ["devbot", "девобот", "dev bot"]
+    },
+    {
+      "id": "game",
+      "name": "Игра Cyber Empire",
+      "icon": "🎮",
+      "description": "Telegram Mini App игра Cyber Empire",
+      "path": "./repos/cyber-empire",
+      "aliases": ["game", "игра", "игру", "cyber empire"]
+    }
+  ]
+}
