@@ -1,0 +1,9 @@
+# Browser runtime
+
+Run `npm run browser:mcp` in the repository. Set `VIEWER_QUEUE_DB` to the same absolute SQLite path used by the agent waiter. `VIEWER_BROWSER_ROOT` optionally relocates the local actor registry, profiles and artifacts; the default is `.viewer-live/browser`. Profiles and SQLite data must never be committed or exported to agents.
+
+Register a dedicated actor with its fixed network, register the project in the task queue, then open a browser session. The default browser is visible for human login. Test actors open WebK with `?test=1`; production actors use a separate persistent profile. The service does not return cookies, storage state, initData, login snapshots, or profile file contents. Mini App origins are explicit and Telegram origins are forbidden for app operations. Open the Mini App from the real Telegram chat. Every action reacquires the unique app frame, including after navigation.
+
+MCP offers actor/session listing, opening, app text, button/link clicks, labelled input, screenshots, pause/resume and close. Only one process can lease an actor profile. Ownership is a local coordination label, not authentication between hostile clients. Run this service over local stdio only. Pause stops agent actions while the human uses the browser. Screenshots contain actual app pixels and do not perform pixel-level secret redaction.
+
+Current verified coverage is a local HTTP fixture in real Chromium with two isolated actors, session ownership, pause, and actual PNG capture. This is not a live Telegram acceptance result. Telegram chat/group/Widget adapters, account provisioning and live scenario acceptance are subsequent work. After a crash, verify that the recorded process and Chromium are stopped before manually removing the profile's `.lease` file. Never delete a lock for a live process.

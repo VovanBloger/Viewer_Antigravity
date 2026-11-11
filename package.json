@@ -11,7 +11,8 @@
     "clean": "next clean",
     "agents:mcp": "tsx runtime/mcp/server.ts",
     "agents:wait": "tsx runtime/cli/wait-task.ts",
-    "agents:task": "tsx runtime/cli/task.ts"
+    "agents:task": "tsx runtime/cli/task.ts",
+    "browser:mcp": "tsx runtime/browser/mcp.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
