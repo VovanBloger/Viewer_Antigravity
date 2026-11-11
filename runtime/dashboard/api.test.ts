@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { openStore } from '../queue/store.ts';
 import { dashboardRequest } from './api.ts';
 
@@ -70,4 +73,42 @@ test('dashboard: latest tasks and all response fields are sanitized, without fil
     assert.doesNotMatch(detail,/AAFkkkk/);assert.match(detail,/REDACTED/);
     assert.equal((await dashboardRequest(new Request('http://localhost/api/lab',{headers:{'sec-fetch-site':'cross-site'}}),store)).status,403);
   }finally{store.close()}
+});
+
+test('dashboard: serves bounded artifacts securely and manages browser sessions', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-dashboard-artifacts-'));
+  const store = openStore({ dbPath: ':memory:' });
+  try {
+    const artifactsDir = path.join(root, 'artifacts');
+    fs.mkdirSync(artifactsDir, { recursive: true });
+    fs.writeFileSync(path.join(artifactsDir, 'test-shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    // Valid png artifact
+    const validRes = await dashboardRequest(new Request('http://localhost/api/lab?artifact=test-shot.png'), store, { artifactsDir });
+    assert.equal(validRes.status, 200);
+    assert.equal(validRes.headers.get('content-type'), 'image/png');
+
+    // Rejects path traversal
+    const traversalRes = await dashboardRequest(new Request('http://localhost/api/lab?artifact=../secret.png'), store, { artifactsDir });
+    assert.equal(traversalRes.status, 400);
+
+    // Rejects invalid extension
+    const badExtRes = await dashboardRequest(new Request('http://localhost/api/lab?artifact=test.exe'), store, { artifactsDir });
+    assert.equal(badExtRes.status, 400);
+
+    // Non-existent artifact returns 404
+    const notFoundRes = await dashboardRequest(new Request('http://localhost/api/lab?artifact=missing.png'), store, { artifactsDir });
+    assert.equal(notFoundRes.status, 404);
+
+    // Browser session controls without lab return 503
+    const noLabRes = await dashboardRequest(new Request('http://localhost/api/lab', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'browser_pause', sessionId: 's1', owner: 'user' })
+    }), store);
+    assert.equal(noLabRes.status, 503);
+  } finally {
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

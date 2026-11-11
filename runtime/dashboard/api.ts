@@ -1,6 +1,14 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { TaskStore } from '../queue/types.ts';
+import type { BrowserLab } from '../browser/lab.ts';
 import { getTask, listTasks, toPublicTask, toServiceError } from '../service.ts';
 import { redactDeep } from '../queue/redact.ts';
+
+export interface DashboardOptions {
+  lab?: BrowserLab;
+  artifactsDir?: string;
+}
 
 const MAX_BODY_BYTES = 40_000;
 
@@ -33,14 +41,31 @@ export function isLocalDashboardRequest(request: Request) {
   return !origin || origin === target.origin;
 }
 
-export async function dashboardRequest(request: Request, store: TaskStore) {
+export async function dashboardRequest(request: Request, store: TaskStore, options?: DashboardOptions) {
   const json = (data: unknown, status = 200) => Response.json(redactDeep(data), { status, headers: { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
   if (!isLocalDashboardRequest(request)) return json({ error: 'LOCAL_SAME_ORIGIN_ONLY' }, 403);
   try {
     if (request.method === 'GET') {
-      const id = new URL(request.url).searchParams.get('id');
+      const url = new URL(request.url);
+      const artifact = url.searchParams.get('artifact');
+      if (artifact) {
+        if (!/^[a-zA-Z0-9_-]{1,100}\.(png|json)$/.test(artifact)) return json({ error: 'INVALID_ARTIFACT' }, 400);
+        const dir = options?.artifactsDir ?? path.resolve('.viewer-live', 'browser', 'artifacts');
+        const file = path.resolve(dir, artifact);
+        const baseDir = path.resolve(dir);
+        if (!file.startsWith(baseDir) || path.relative(baseDir, file).startsWith('..')) return json({ error: 'ACCESS_DENIED' }, 403);
+        if (!fs.existsSync(file)) return json({ error: 'NOT_FOUND' }, 404);
+        const mime = artifact.endsWith('.png') ? 'image/png' : 'application/json';
+        return new Response(fs.readFileSync(file), { status: 200, headers: { 'content-type': mime, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+      }
+      const id = url.searchParams.get('id');
       if (id) return json({ task: toPublicTask(getTask(store, id), { compact: true }), events: store.events(id).slice(-30) });
-      return json({ projects: store.listProjects().map(({id,name}) => ({id,name})), tasks: listTasks(store, { limit: 100 }).map(t => toPublicTask(t, { compact: true })) });
+      return json({
+        projects: store.listProjects().map(({id,name}) => ({id,name})),
+        tasks: listTasks(store, { limit: 100 }).map(t => toPublicTask(t, { compact: true })),
+        sessions: options?.lab ? options.lab.list() : [],
+        actors: options?.lab ? options.lab.listActors() : []
+      });
     }
     if (request.method !== 'POST') return json({ error: 'METHOD_NOT_ALLOWED' }, 405);
     if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') return json({ error: 'JSON_REQUIRED' }, 415);
@@ -48,6 +73,14 @@ export async function dashboardRequest(request: Request, store: TaskStore) {
     if (raw === undefined) return json({ error: 'REQUEST_TOO_LARGE' }, 413);
     const body = JSON.parse(raw);
     if (!body || typeof body !== 'object' || Array.isArray(body)) return json({ error: 'INVALID_REQUEST' }, 400);
+    if (body.action === 'browser_pause' || body.action === 'browser_resume' || body.action === 'browser_close') {
+      if (!options?.lab) return json({ error: 'BROWSER_LAB_NOT_AVAILABLE' }, 503);
+      if (typeof body.sessionId !== 'string' || !body.sessionId || typeof body.owner !== 'string' || !body.owner) return json({ error: 'SESSION_AND_OWNER_REQUIRED' }, 400);
+      if (body.action === 'browser_pause') options.lab.pause(body.sessionId, body.owner);
+      else if (body.action === 'browser_resume') options.lab.resume(body.sessionId, body.owner);
+      else await options.lab.close(body.sessionId, body.owner);
+      return json({ ok: true, sessions: options.lab.list() });
+    }
     if (body.action === 'submit') {
       // The browser form cannot override directories, credentials or notification channels.
       const { projectId, title, goal, acceptance, idempotencyKey } = body;

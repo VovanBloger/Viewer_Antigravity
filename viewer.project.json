@@ -1,0 +1,35 @@
+{
+  "$schema": "./schemas/viewer.project.schema.json",
+  "version": 1,
+  "id": "viewer",
+  "name": "Viewer Antigravity 2.0 Studio",
+  "description": "Local Telegram Mini App & Bot development laboratory and queue coordinator",
+  "type": "managed",
+  "network": "test",
+  "ports": {
+    "dashboard": 3100
+  },
+  "readiness": {
+    "path": "/api/lab",
+    "timeoutMs": 5000
+  },
+  "environments": {
+    "isolatedDataDir": ".viewer-live",
+    "queueDatabase": ".viewer-live/agent-queue.db"
+  },
+  "commands": {
+    "dev": "npm run viewer:dev",
+    "test": "npm test",
+    "build": "npm run build"
+  },
+  "pilots": [
+    {
+      "id": "counter",
+      "manifest": "adapters/counter.fixture.json"
+    },
+    {
+      "id": "gametycone",
+      "manifest": "adapters/gametycone.template.json"
+    }
+  ]
+}

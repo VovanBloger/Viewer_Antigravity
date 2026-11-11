@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Environment } from '../environments/manager.ts';
+import type { TaskStore } from '../queue/types.ts';
 import { redactSecrets } from '../queue/redact.ts';
 
 export interface ProjectAdapter {
@@ -63,4 +64,15 @@ export function bindAdapter(adapter: ProjectAdapter, environment: Environment, o
   const replacements: Record<string,string>={PORT:String(environment.port),WORKTREE:environment.worktree,DATA_DIR:environment.dataDir,DATABASE_PATH:environment.databasePath,BOT_ID:environment.botId,NETWORK:environment.network};
   const args=command.args.map(arg=>arg.replace(/\$\{([^}]+)\}/g,(_,key:string)=>{if(!(key in replacements)) throw new Error('UNKNOWN_ADAPTER_VARIABLE');return replacements[key]}));
   return { executable,args,readinessUrl:`http://127.0.0.1:${environment.port}${adapter.readinessPath ?? '/health'}` };
+}
+
+export function registerProjectFromManifest(manifestPath: string, store: TaskStore) {
+  const content = JSON.parse(fs.readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, ''));
+  if (content.version !== 1 || !content.id || !content.name) throw new Error('INVALID_PROJECT_MANIFEST');
+  const projectDir = path.dirname(path.resolve(manifestPath));
+  return store.registerProject({
+    id: String(content.id).trim(),
+    name: String(content.name).trim(),
+    path: projectDir
+  });
 }

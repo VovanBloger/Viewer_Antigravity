@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { CounterPilot, type BotTransport, type PilotMethod } from './counter.ts';
-import { parseAdapter, loadAdapter } from './adapters.ts';
+import { parseAdapter, loadAdapter, registerProjectFromManifest } from './adapters.ts';
 import { startCounterFixture } from '../../examples/counter/http.ts';
+import { openStore } from '../queue/store.ts';
 
 test('ProjectAdapter parser and loader validate manifests securely', () => {
   const fakeLookup = (id: string) => (id === 'counter' || id === 'game' ? { id } : undefined);
@@ -210,4 +211,17 @@ test('startCounterFixture runs local HTTP server and executes idempotent increme
 
   await fixture.close();
   pilot.close();
+});
+
+test('registerProjectFromManifest registers project from viewer.project.json into TaskStore', () => {
+  const store = openStore({ dbPath: ':memory:' });
+  try {
+    const manifestPath = path.resolve('viewer.project.json');
+    const project = registerProjectFromManifest(manifestPath, store);
+    assert.equal(project.id, 'viewer');
+    assert.equal(project.name, 'Viewer Antigravity 2.0 Studio');
+    assert.equal(store.getProject('viewer')?.id, 'viewer');
+  } finally {
+    store.close();
+  }
 });

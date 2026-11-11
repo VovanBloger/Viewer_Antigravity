@@ -7,6 +7,7 @@ import { BrowserLab } from './lab.ts';
 import { openStore } from '../queue/store.ts';
 import type { TaskStore } from '../queue/types.ts';
 import { redactDeep } from '../queue/redact.ts';
+import { initBrowserRoot } from './defaults.ts';
 import { runScenario, type PaymentAdapter, type Scenario } from './scenario.ts';
 
 /** A separate stdio service keeps browser processes alive across coordinator calls. */
@@ -57,7 +58,9 @@ export function createBrowserServer(lab: BrowserLab, store: TaskStore, options:{
 
 export async function main() {
   const store = openStore({ dbPath: process.env.VIEWER_QUEUE_DB });
-  const lab = new BrowserLab(process.env.VIEWER_BROWSER_ROOT ?? path.resolve('.viewer-live', 'browser'), process.env.VIEWER_HEADLESS === '1');
+  const browserRoot = process.env.VIEWER_BROWSER_ROOT ?? path.resolve('.viewer-live', 'browser');
+  initBrowserRoot(browserRoot);
+  const lab = new BrowserLab(browserRoot, process.env.VIEWER_HEADLESS === '1');
   const server = createBrowserServer(lab, store);
   let stopping = false;
   const stop = () => {

@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ViewerProjectManifest",
+  "type": "object",
+  "required": ["version", "id", "name", "type", "network"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "integer", "enum": [1] },
+    "id": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,80}$" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "description": { "type": "string", "maxLength": 1000 },
+    "type": { "type": "string", "enum": ["managed", "blackbox", "fixture"] },
+    "network": { "type": "string", "enum": ["test", "production"] },
+    "ports": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 1024, "maximum": 65535 }
+    },
+    "readiness": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^/[a-zA-Z0-9_/-]*$" },
+        "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 60000 }
+      }
+    },
+    "environments": {
+      "type": "object",
+      "properties": {
+        "isolatedDataDir": { "type": "string" },
+        "queueDatabase": { "type": "string" }
+      }
+    },
+    "commands": {
+      "type": "object",
+      "properties": {
+        "dev": { "type": "string" },
+        "test": { "type": "string" },
+        "build": { "type": "string" }
+      }
+    },
+    "pilots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "manifest"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,80}$" },
+          "manifest": { "type": "string" }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

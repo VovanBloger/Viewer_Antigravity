@@ -36,3 +36,25 @@ test('browser MCP rejects unknown project and Telegram auth origin before launch
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('initBrowserRoot populates 10 testDC actors and 2 production actors with strict chat policy', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-browser-defaults-'));
+  try {
+    const { initBrowserRoot, DEFAULT_ACTORS } = require('./defaults.ts');
+    initBrowserRoot(root);
+    assert.equal(fs.existsSync(path.join(root, 'actors.json')), true);
+    assert.equal(fs.existsSync(path.join(root, 'chat-policy.json')), true);
+
+    const lab = new BrowserLab(root, true);
+    const actors = lab.listActors();
+    assert.equal(actors.length, 12);
+    assert.equal(actors.filter(a => a.network === 'test').length, 10);
+    assert.equal(actors.filter(a => a.network === 'production').length, 2);
+
+    const policy = lab.actorPolicy('test-actor-01');
+    assert.equal(policy.network, 'test');
+    assert.ok(policy.chats.some(c => c.peerId === '101'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
